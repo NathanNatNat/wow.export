@@ -105,7 +105,7 @@ module.exports = {
 								</div>
 								<div v-if="ctrl.type === 'dropdown'" class="mv-panel-dropdown-row">
 									<label class="mv-panel-label">{{ ctrl.label }}</label>
-									<select class="mv-panel-dropdown" :value="get_ctrl_value(ctrl)" @change="set_ctrl_value(ctrl, $event.target.value)">
+									<select class="mv-panel-dropdown" :value="get_ctrl_value(ctrl)" @change="set_ctrl_value(ctrl, $event.target.value); $event.target.blur()">
 										<option v-for="opt in ctrl.options" :key="opt" :value="opt">{{ opt }}</option>
 									</select>
 								</div>
