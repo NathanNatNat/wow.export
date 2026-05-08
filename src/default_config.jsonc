@@ -120,5 +120,7 @@
 	"showZoneBaseMap": true,
 	"showZoneOverlays": true,
 	"allowCacheCollection": true,
-	"machineId": null
+	"machineId": null,
+	"mapViewerRenderDistance": 8,
+	"mapViewerFlySpeed": 200
 }

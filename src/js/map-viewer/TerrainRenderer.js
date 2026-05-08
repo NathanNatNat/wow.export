@@ -106,6 +106,14 @@ class TerrainRenderer {
 		return this._chunk_count;
 	}
 
+	set_render_distance(val) {
+		this.render_distance = Math.max(1, Math.min(256, val));
+
+		// force tile re-evaluation on next frame
+		this._last_tx = NaN;
+		this._last_ty = NaN;
+	}
+
 	async init(map_dir) {
 		this._casc = core.view.casc;
 		const prefix = 'world/maps/' + map_dir + '/' + map_dir;

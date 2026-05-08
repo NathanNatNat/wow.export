@@ -5,18 +5,18 @@ const KEY_D = 68;
 const KEY_Q = 81;
 const KEY_E = 69;
 
-const MOVE_SPEED = 200;
-const MOVE_SPEED_FAST = 800;
-const MOVE_SPEED_SLOW = 40;
+const SPEED_FAST_MULT = 4;
+const SPEED_SLOW_MULT = 0.2;
 
 const MOUSE_SENSITIVITY = 0.003;
 const SCROLL_SPEED = 150;
 const PITCH_LIMIT = Math.PI / 2 - 0.01;
 
 class FreeCameraControls {
-	constructor(camera, dom_element) {
+	constructor(camera, dom_element, get_speed) {
 		this.camera = camera;
 		this.dom_element = dom_element;
+		this._get_speed = get_speed;
 
 		this.yaw = 0;
 		this.pitch = -0.4;
@@ -102,16 +102,14 @@ class FreeCameraControls {
 	}
 
 	update(dt) {
-		// movement
-		let speed = MOVE_SPEED;
+		let speed = this._get_speed();
 		if (this._shift)
-			speed = MOVE_SPEED_FAST;
+			speed *= SPEED_FAST_MULT;
 		else if (this._alt)
-			speed = MOVE_SPEED_SLOW;
+			speed *= SPEED_SLOW_MULT;
 
 		const move = speed * dt;
 
-		// forward/right on XZ plane (no pitch influence for WASD)
 		const fwd_x = Math.sin(this.yaw);
 		const fwd_z = Math.cos(this.yaw);
 		const right_x = Math.cos(this.yaw);
@@ -145,7 +143,6 @@ class FreeCameraControls {
 		if (this._keys.has(KEY_E))
 			pos[1] -= move;
 
-		// update look target from yaw/pitch
 		const cos_pitch = Math.cos(this.pitch);
 		this.camera.lookAt(
 			pos[0] + Math.sin(this.yaw) * cos_pitch,
