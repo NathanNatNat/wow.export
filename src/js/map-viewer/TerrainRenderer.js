@@ -2,7 +2,7 @@ const core = require('../core');
 const constants = require('../constants');
 const ADTLoader = require('../3D/loaders/ADTLoader');
 const WDTLoader = require('../3D/loaders/WDTLoader');
-const ShaderProgram = require('../3D/gl/ShaderProgram');
+const Shaders = require('../3D/Shaders');
 const VertexArray = require('../3D/gl/VertexArray');
 
 const MAP_SIZE = constants.GAME.MAP_SIZE;
@@ -20,60 +20,11 @@ const MAX_TILE_VERTEX_BYTES = 256 * 145 * 24;
 // 256 chunks × 768 indices × 2 bytes (uint16)
 const MAX_TILE_INDEX_BYTES = 256 * 768 * 2;
 
-const VERT_SHADER = `#version 300 es
-precision highp float;
-
-layout(location = 0) in vec3 a_position;
-layout(location = 1) in vec3 a_normal;
-
-uniform mat4 u_view;
-uniform mat4 u_projection;
-
-out vec3 v_normal;
-out vec3 v_position;
-
-void main() {
-	gl_Position = u_projection * u_view * vec4(a_position, 1.0);
-	v_normal = a_normal;
-	v_position = a_position;
-}
-`;
-
-const FRAG_SHADER = `#version 300 es
-precision highp float;
-
-in vec3 v_normal;
-in vec3 v_position;
-
-out vec4 frag_color;
-
-const vec3 LIGHT_DIR = vec3(0.5051, 0.8081, 0.3031);
-const vec3 SKY_COLOR = vec3(0.4, 0.5, 0.7);
-const vec3 GROUND_COLOR = vec3(0.25, 0.2, 0.15);
-const vec3 SUN_COLOR = vec3(1.0, 0.95, 0.85);
-const float AMBIENT = 0.25;
-
-void main() {
-	vec3 n = normalize(v_normal);
-	float n_dot_l = dot(n, LIGHT_DIR);
-
-	// hemisphere ambient (sky vs ground)
-	float sky_factor = 0.5 + 0.5 * n.y;
-	vec3 ambient = mix(GROUND_COLOR, SKY_COLOR, sky_factor) * AMBIENT;
-
-	// diffuse
-	float diffuse = max(n_dot_l, 0.0);
-	vec3 color = vec3(0.5, 0.55, 0.4) * (ambient + SUN_COLOR * diffuse * 0.75);
-
-	frag_color = vec4(color, 1.0);
-}
-`;
-
 class TerrainRenderer {
 	constructor(gl_context) {
 		this.ctx = gl_context;
 		this.gl = gl_context.gl;
-		this.shader = new ShaderProgram(gl_context, VERT_SHADER, FRAG_SHADER);
+		this.shader = Shaders.create_program(gl_context, 'mpv_terrain');
 		this.render_distance = DEFAULT_RENDER_DISTANCE;
 		this.map_center = [0, 0, 0];
 
@@ -597,6 +548,7 @@ class TerrainRenderer {
 		this._vao_pool.length = 0;
 
 		if (this.shader) {
+			Shaders.unregister(this.shader);
 			this.shader.dispose();
 			this.shader = null;
 		}
