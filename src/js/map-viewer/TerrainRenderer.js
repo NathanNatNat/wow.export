@@ -157,10 +157,11 @@ class TerrainRenderer {
 
 		const vert_count = chunk_count * 145;
 		const vertex_data = new Float32Array(vert_count * 6);
-		const indices = [];
+		const index_data = new Uint16Array(chunk_count * 768);
 
 		let vert_offset = 0;
 		let chunk_vert_base = 0;
+		let idx_offset = 0;
 
 		for (let x = 0; x < 16; x++) {
 			for (let y = 0; y < 16; y++) {
@@ -215,10 +216,18 @@ class TerrainRenderer {
 				// generate triangle indices for inner vertices
 				for (let j = 9; j < 145; j++) {
 					const ind = chunk_vert_base + j;
-					indices.push(ind, ind - 9, ind + 8);
-					indices.push(ind, ind - 8, ind - 9);
-					indices.push(ind, ind + 9, ind - 8);
-					indices.push(ind, ind + 8, ind + 9);
+					index_data[idx_offset++] = ind;
+					index_data[idx_offset++] = ind - 9;
+					index_data[idx_offset++] = ind + 8;
+					index_data[idx_offset++] = ind;
+					index_data[idx_offset++] = ind - 8;
+					index_data[idx_offset++] = ind - 9;
+					index_data[idx_offset++] = ind;
+					index_data[idx_offset++] = ind + 9;
+					index_data[idx_offset++] = ind - 8;
+					index_data[idx_offset++] = ind;
+					index_data[idx_offset++] = ind + 8;
+					index_data[idx_offset++] = ind + 9;
 
 					// skip outer row vertices between inner rows
 					if (!((j + 1) % 17))
@@ -231,8 +240,8 @@ class TerrainRenderer {
 
 		return {
 			vertex_data,
-			index_data: new Uint16Array(indices),
-			index_count: indices.length
+			index_data,
+			index_count: idx_offset
 		};
 	}
 
