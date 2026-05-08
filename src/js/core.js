@@ -225,6 +225,8 @@ const makeNewView = () => {
 		mapViewerChunkMask: null, // Map viewer chunk mask.
 		mapViewerGridSize: null, // Map viewer grid size (null = default 64).
 		mapViewerSelection: [], // Map viewer tile selection
+		mapViewerActive: false,
+		mapViewerMapDir: null,
 		selectedExpansionFilter: -1, // Currently selected expansion filter (-1 = show all)
 		chrModelViewerContext: null, // 3D context for the character-specific model viewer.
 		chrModelViewerAnims: [], // Available character animations.

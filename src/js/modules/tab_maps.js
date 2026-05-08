@@ -306,6 +306,7 @@ module.exports = {
 			<div class="spaced-preview-controls">
 				<input v-if="$core.view.mapViewerHasWorldModel" type="button" value="Export Global WMO" @click="export_map_wmo" :class="{ disabled: $core.view.isBusy }"/>
 				<input v-if="$core.view.mapViewerHasWorldModel" type="button" value="Export WMO Minimap" @click="export_map_wmo_minimap" :class="{ disabled: $core.view.isBusy }"/>
+				<input v-if="!$core.view.mapViewerIsWMOMinimap" type="button" value="View Map" @click="view_map" :disabled="$core.view.isBusy || !$core.view.mapViewerSelectedDir"/>
 				<component v-if="!$core.view.mapViewerIsWMOMinimap" :is="$components.MenuButton" :options="$core.view.menuButtonMapExport" :default="$core.view.config.exportMapFormat" @change="$core.view.config.exportMapFormat = $event" :disabled="$core.view.isBusy || $core.view.mapViewerSelection.length === 0" @click="export_map"></component>
 			</div>
 
@@ -364,6 +365,11 @@ module.exports = {
 	`,
 
 	methods: {
+		view_map() {
+			this.$core.view.mapViewerMapDir = selected_map_dir;
+			this.$core.view.mapViewerActive = true;
+		},
+
 		handle_map_context(data) {
 			this.$core.view.contextMenus.nodeMap = {
 				selection: data.selection,

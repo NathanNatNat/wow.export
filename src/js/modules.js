@@ -21,7 +21,8 @@ const COMPONENTS = {
 	ContextMenu: require('./components/context-menu'),
 	ItemPickerModal: require('./components/item-picker-modal'),
 	MarkdownContent: require('./components/markdown-content'),
-	HomeShowcase: require('./components/home-showcase')
+	HomeShowcase: require('./components/home-showcase'),
+	MapViewerScreen: require('./map-viewer/MapViewerScreen')
 };
 
 const MODULES = {
