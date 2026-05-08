@@ -127,5 +127,9 @@
 	"mapViewerSkyColor": "#1f1f1f",
 	"mapViewerTerrainColor": "#878787",
 	"mapViewerWireframeColor": "#57afe2",
-	"mapViewerWireframeOcclusion": true
+	"mapViewerWireframeOcclusion": true,
+	"mapViewerSunAzimuth": 310,
+	"mapViewerSunElevation": 55,
+	"mapViewerSunIntensity": 100,
+	"mapViewerSunColor": "#fff2d9"
 }

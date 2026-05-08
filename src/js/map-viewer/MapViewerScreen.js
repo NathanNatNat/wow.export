@@ -24,6 +24,16 @@ const SECTIONS = [
 		]
 	},
 	{
+		id: 'lighting',
+		label: 'Lighting',
+		controls: [
+			{ type: 'slider', key: 'mapViewerSunAzimuth', label: 'Sun Azimuth', min: 0, max: 360, step: 1 },
+			{ type: 'slider', key: 'mapViewerSunElevation', label: 'Sun Elevation', min: 0, max: 90, step: 1 },
+			{ type: 'slider', key: 'mapViewerSunIntensity', label: 'Sun Intensity', min: 0, max: 100, step: 1 },
+			{ type: 'color', key: 'mapViewerSunColor', label: 'Sun Colour' }
+		]
+	},
+	{
 		id: 'terrain',
 		label: 'Terrain',
 		controls: [
@@ -47,6 +57,13 @@ function hex_to_rgb(hex) {
 	const g = parseInt(hex.slice(3, 5), 16) / 255;
 	const b = parseInt(hex.slice(5, 7), 16) / 255;
 	return new Float32Array([r, g, b]);
+}
+
+function compute_light_dir(azimuth_deg, elevation_deg) {
+	const az = azimuth_deg * Math.PI / 180;
+	const el = elevation_deg * Math.PI / 180;
+	const cos_el = Math.cos(el);
+	return new Float32Array([cos_el * Math.sin(az), Math.sin(el), cos_el * Math.cos(az)]);
 }
 
 module.exports = {
@@ -158,6 +175,24 @@ module.exports = {
 
 		'config.mapViewerWireframeColor'(val) {
 			this._wireframe_color = hex_to_rgb(val);
+		},
+
+		'config.mapViewerSunAzimuth'() {
+			this._update_light_dir();
+		},
+
+		'config.mapViewerSunElevation'() {
+			this._update_light_dir();
+		},
+
+		'config.mapViewerSunIntensity'(val) {
+			if (this._terrain)
+				this._terrain.sun_intensity = val / 100;
+		},
+
+		'config.mapViewerSunColor'(val) {
+			if (this._terrain)
+				this._terrain.sun_color = hex_to_rgb(val);
 		}
 	},
 
@@ -324,11 +359,26 @@ module.exports = {
 				await terrain.init(map_dir);
 				terrain.set_render_distance(core.view.config.mapViewerRenderDistance);
 				this._terrain = terrain;
+				this._apply_sun_settings();
 				this._position_camera();
 			} catch (e) {
 				this.status_text = 'Error: ' + e.message;
 				terrain.dispose();
 			}
+		},
+
+		_update_light_dir() {
+			if (this._terrain)
+				this._terrain.light_dir = compute_light_dir(this.config.mapViewerSunAzimuth, this.config.mapViewerSunElevation);
+		},
+
+		_apply_sun_settings() {
+			if (!this._terrain)
+				return;
+
+			this._terrain.light_dir = compute_light_dir(this.config.mapViewerSunAzimuth, this.config.mapViewerSunElevation);
+			this._terrain.sun_color = hex_to_rgb(this.config.mapViewerSunColor);
+			this._terrain.sun_intensity = this.config.mapViewerSunIntensity / 100;
 		},
 
 		_position_camera() {

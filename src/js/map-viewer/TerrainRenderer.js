@@ -47,6 +47,10 @@ class TerrainRenderer {
 		this._last_tx = NaN;
 		this._last_ty = NaN;
 
+		this.light_dir = new Float32Array([-0.4394, 0.8192, 0.3687]);
+		this.sun_color = new Float32Array([1.0, 0.95, 0.85]);
+		this.sun_intensity = 1.0;
+
 		this._vao_pool = [];
 		this._frustum_planes = new Float32Array(24);
 		this._vp_matrix = new Float32Array(16);
@@ -474,6 +478,9 @@ class TerrainRenderer {
 		this.shader.set_uniform_mat4('u_view', false, view_matrix);
 		this.shader.set_uniform_mat4('u_projection', false, projection_matrix);
 		this.shader.set_uniform_3fv('u_terrain_color', terrain_color);
+		this.shader.set_uniform_3fv('u_light_dir', this.light_dir);
+		this.shader.set_uniform_3fv('u_sun_color', this.sun_color);
+		this.shader.set_uniform_1f('u_sun_intensity', this.sun_intensity);
 
 		this._compute_frustum(view_matrix, projection_matrix);
 
@@ -550,6 +557,9 @@ class TerrainRenderer {
 		this.minimap_shader.set_uniform_mat4('u_view', false, view_matrix);
 		this.minimap_shader.set_uniform_mat4('u_projection', false, projection_matrix);
 		this.minimap_shader.set_uniform_1i('u_minimap', 0);
+		this.minimap_shader.set_uniform_3fv('u_light_dir', this.light_dir);
+		this.minimap_shader.set_uniform_3fv('u_sun_color', this.sun_color);
+		this.minimap_shader.set_uniform_1f('u_sun_intensity', this.sun_intensity);
 
 		this._compute_frustum(view_matrix, projection_matrix);
 
