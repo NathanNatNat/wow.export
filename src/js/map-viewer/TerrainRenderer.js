@@ -390,9 +390,11 @@ class TerrainRenderer {
 						}
 
 						// uv: map vertex to [0,1] across the tile
+						// u increases with col (matching composite canvas x = chunk y)
+						// v decreases with row (bake formula: v = (vz - origin) / TILE_SIZE, vz decreases with row)
 						const col_frac = is_short ? (col + 0.5) / 8 : col / 8;
 						vertex_data[di + 6] = (y + col_frac) / 16;
-						vertex_data[di + 7] = (x + row / 16) / 16;
+						vertex_data[di + 7] = 1.0 - (x + row / 16) / 16;
 
 						if (vx < tile_min[0]) tile_min[0] = vx;
 						if (vy < tile_min[1]) tile_min[1] = vy;
