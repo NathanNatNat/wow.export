@@ -366,12 +366,14 @@ class TerrainRenderer {
 		// coalesce consecutive visible chunks into single draw calls
 		let batch_start = -1;
 		let batch_count = 0;
+		let visible = 0;
 
 		for (let i = 0; i < count; i++) {
 			const bo = i * 6;
 			const dw = i * 2;
 
 			if (this._is_aabb_visible(bounds, bo, planes)) {
+				visible++;
 				const offset = draw[dw];
 				const idx_count = draw[dw + 1];
 
@@ -393,6 +395,8 @@ class TerrainRenderer {
 
 		if (batch_start !== -1)
 			this.vao.draw(gl.TRIANGLES, batch_count, batch_start);
+
+		return visible;
 	}
 
 	_compute_frustum(view, proj) {

@@ -95,8 +95,10 @@ module.exports = {
 				this._controls.update(dt);
 				this._gl_ctx.clear(true, true);
 
-				if (this._terrain)
-					this._terrain.render(this._camera.view_matrix, this._camera.projection_matrix);
+				if (this._terrain) {
+					const visible = this._terrain.render(this._camera.view_matrix, this._camera.projection_matrix);
+					this.status_text = this._terrain.tile_count + ' ADT, render (' + visible + '/' + this._terrain._chunk_count + ')';
+				}
 
 				requestAnimationFrame(frame);
 			};
@@ -125,7 +127,6 @@ module.exports = {
 				});
 
 				this._position_camera();
-				this.status_text = this._terrain.tile_count + ' tiles loaded';
 			} catch (e) {
 				this.status_text = 'Error: ' + e.message;
 			}
