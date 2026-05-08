@@ -45,16 +45,12 @@ class FreeCameraControls {
 
 		document.addEventListener('mousemove', this._on_move);
 		document.addEventListener('mouseup', this._on_up);
-		el.addEventListener('keydown', this._on_keydown);
-		el.addEventListener('keyup', this._on_keyup);
-
-		if (el.tabIndex === -1)
-			el.tabIndex = 0;
+		document.addEventListener('keydown', this._on_keydown);
+		document.addEventListener('keyup', this._on_keyup);
 	}
 
 	_on_mouse_down(e) {
 		e.preventDefault();
-		this.dom_element.focus();
 		this._is_dragging = true;
 		this._last_mouse_x = e.clientX;
 		this._last_mouse_y = e.clientY;
@@ -89,13 +85,29 @@ class FreeCameraControls {
 		this.camera.position[2] += Math.cos(this.yaw) * cos_pitch * dir * SCROLL_SPEED;
 	}
 
+	_is_text_input(el) {
+		if (el.tagName === 'TEXTAREA' || el.isContentEditable)
+			return true;
+
+		if (el.tagName === 'INPUT')
+			return el.type === 'text' || el.type === 'number' || el.type === 'search';
+
+		return false;
+	}
+
 	_on_key_down(e) {
+		if (this._is_text_input(e.target))
+			return;
+
 		this._keys.add(e.keyCode);
 		this._shift = e.shiftKey;
 		this._alt = e.altKey;
 	}
 
 	_on_key_up(e) {
+		if (this._is_text_input(e.target))
+			return;
+
 		this._keys.delete(e.keyCode);
 		this._shift = e.shiftKey;
 		this._alt = e.altKey;
@@ -154,8 +166,8 @@ class FreeCameraControls {
 	dispose() {
 		document.removeEventListener('mousemove', this._on_move);
 		document.removeEventListener('mouseup', this._on_up);
-		this.dom_element.removeEventListener('keydown', this._on_keydown);
-		this.dom_element.removeEventListener('keyup', this._on_keyup);
+		document.removeEventListener('keydown', this._on_keydown);
+		document.removeEventListener('keyup', this._on_keyup);
 	}
 }
 

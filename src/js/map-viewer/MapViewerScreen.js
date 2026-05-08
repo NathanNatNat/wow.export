@@ -39,7 +39,7 @@ function hex_to_rgb(hex) {
 
 module.exports = {
 	template: `<div class="map-viewer-screen">
-		<canvas ref="canvas" tabindex="0"></canvas>
+		<canvas ref="canvas"></canvas>
 		<template v-if="show_ui">
 			<div class="map-viewer-hud">
 				<span v-if="config.mapViewerShowStats" class="map-viewer-status">{{ status_text }}</span>
@@ -144,7 +144,6 @@ module.exports = {
 		document.addEventListener('keydown', this._key_handler);
 
 		await this._init_terrain();
-		this.$refs.canvas?.focus();
 	},
 
 	beforeUnmount() {
