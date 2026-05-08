@@ -123,5 +123,7 @@
 	"machineId": null,
 	"mapViewerRenderDistance": 8,
 	"mapViewerFlySpeed": 200,
-	"mapViewerShowStats": true
+	"mapViewerShowStats": true,
+	"mapViewerSkyColor": "#1f1f1f",
+	"mapViewerTerrainColor": "#878787"
 }

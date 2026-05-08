@@ -16,7 +16,9 @@ const SECTIONS = [
 		id: 'rendering',
 		label: 'Rendering',
 		controls: [
-			{ type: 'slider', key: 'mapViewerRenderDistance', label: 'Render Distance', min: 1, max: 256, step: 1 }
+			{ type: 'slider', key: 'mapViewerRenderDistance', label: 'Render Distance', min: 1, max: 256, step: 1 },
+			{ type: 'color', key: 'mapViewerSkyColor', label: 'Sky Colour' },
+			{ type: 'color', key: 'mapViewerTerrainColor', label: 'Terrain Colour' }
 		]
 	},
 	{
@@ -27,6 +29,13 @@ const SECTIONS = [
 		]
 	}
 ];
+
+function hex_to_rgb(hex) {
+	const r = parseInt(hex.slice(1, 3), 16) / 255;
+	const g = parseInt(hex.slice(3, 5), 16) / 255;
+	const b = parseInt(hex.slice(5, 7), 16) / 255;
+	return new Float32Array([r, g, b]);
+}
 
 module.exports = {
 	template: `<div class="map-viewer-screen">
@@ -52,7 +61,7 @@ module.exports = {
 								/>
 								<span class="mv-panel-label">{{ ctrl.label }}</span>
 							</label>
-							<template v-else>
+							<template v-else-if="ctrl.type === 'slider'">
 								<label class="mv-panel-label">{{ ctrl.label }}</label>
 							</template>
 							<div v-if="ctrl.type === 'slider'" class="mv-panel-slider-row">
@@ -66,6 +75,16 @@ module.exports = {
 									@input="config[ctrl.key] = Number($event.target.value)"
 								/>
 								<span class="mv-panel-value">{{ config[ctrl.key] }}</span>
+							</div>
+							<div v-if="ctrl.type === 'color'" class="mv-panel-color-row">
+								<label class="mv-panel-label">{{ ctrl.label }}</label>
+								<div class="mv-panel-color-swatch" :style="{ background: config[ctrl.key] }" @click="open_picker($event)">
+									<input
+										type="color"
+										:value="config[ctrl.key]"
+										@input="config[ctrl.key] = $event.target.value"
+									/>
+								</div>
 							</div>
 						</div>
 					</div>
@@ -97,6 +116,17 @@ module.exports = {
 		'config.mapViewerRenderDistance'(val) {
 			if (this._terrain)
 				this._terrain.set_render_distance(val);
+		},
+
+		'config.mapViewerSkyColor'(val) {
+			if (this._gl_ctx) {
+				const c = hex_to_rgb(val);
+				this._gl_ctx.set_clear_color(c[0], c[1], c[2], 1);
+			}
+		},
+
+		'config.mapViewerTerrainColor'(val) {
+			this._terrain_color = hex_to_rgb(val);
 		}
 	},
 
@@ -132,6 +162,10 @@ module.exports = {
 			this.open_section = this.open_section === id ? null : id;
 		},
 
+		open_picker(e) {
+			e.currentTarget.querySelector('input[type="color"]').click();
+		},
+
 		_init_gl() {
 			const canvas = this.$refs.canvas;
 			const dpr = window.devicePixelRatio || 1;
@@ -145,7 +179,11 @@ module.exports = {
 			});
 
 			this._gl_ctx.set_viewport(canvas.width, canvas.height);
-			this._gl_ctx.set_clear_color(0.08, 0.08, 0.12, 1);
+
+			const sky = hex_to_rgb(core.view.config.mapViewerSkyColor);
+			this._gl_ctx.set_clear_color(sky[0], sky[1], sky[2], 1);
+			this._terrain_color = hex_to_rgb(core.view.config.mapViewerTerrainColor);
+
 			this._gl_ctx.set_depth_test(true);
 
 			this._resize_handler = () => {
@@ -182,7 +220,7 @@ module.exports = {
 
 				if (this._terrain) {
 					this._terrain.update(this._camera.position);
-					const visible = this._terrain.render(this._camera.view_matrix, this._camera.projection_matrix);
+					const visible = this._terrain.render(this._camera.view_matrix, this._camera.projection_matrix, this._terrain_color);
 					const loaded = this._terrain.tile_count;
 					const loading = this._terrain.loading_count;
 					this.status_text = loaded + ' ADT (' + loading + ' queued), render (' + visible + '/' + this._terrain.chunk_count + ')';

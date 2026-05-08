@@ -407,13 +407,14 @@ class TerrainRenderer {
 		};
 	}
 
-	render(view_matrix, projection_matrix) {
+	render(view_matrix, projection_matrix, terrain_color) {
 		if (!this.shader.is_valid() || this._tiles.size === 0)
 			return 0;
 
 		this.shader.use();
 		this.shader.set_uniform_mat4('u_view', false, view_matrix);
 		this.shader.set_uniform_mat4('u_projection', false, projection_matrix);
+		this.shader.set_uniform_3fv('u_terrain_color', terrain_color);
 
 		this._compute_frustum(view_matrix, projection_matrix);
 

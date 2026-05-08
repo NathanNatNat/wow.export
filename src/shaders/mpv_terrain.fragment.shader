@@ -4,6 +4,8 @@ precision highp float;
 in vec3 v_normal;
 in vec3 v_position;
 
+uniform vec3 u_terrain_color;
+
 out vec4 frag_color;
 
 const vec3 LIGHT_DIR = vec3(0.5051, 0.8081, 0.3031);
@@ -22,7 +24,7 @@ void main() {
 
 	// diffuse
 	float diffuse = max(n_dot_l, 0.0);
-	vec3 color = vec3(0.5, 0.55, 0.4) * (ambient + SUN_COLOR * diffuse * 0.75);
+	vec3 color = u_terrain_color * (ambient + SUN_COLOR * diffuse * 0.75);
 
 	frag_color = vec4(color, 1.0);
 }
