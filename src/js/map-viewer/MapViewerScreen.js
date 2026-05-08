@@ -31,47 +31,57 @@ const SECTIONS = [
 module.exports = {
 	template: `<div class="map-viewer-screen">
 		<canvas ref="canvas" tabindex="0"></canvas>
-		<div class="map-viewer-hud">
-			<span v-if="config.mapViewerShowStats" class="map-viewer-status">{{ status_text }}</span>
-			<button class="map-viewer-close" @click="close" title="Close (Esc)">&#x2715;</button>
-		</div>
-		<div class="mv-panel">
-			<div v-for="section in sections" :key="section.id" class="mv-panel-section">
-				<div class="mv-panel-header" @click="toggle_section(section.id)">
-					<span class="mv-panel-arrow" :class="{ open: open_section === section.id }">&#x25B6;</span>
-					{{ section.label }}
-				</div>
-				<div v-if="open_section === section.id" class="mv-panel-body">
-					<div v-for="ctrl in section.controls" :key="ctrl.key" class="mv-panel-control">
-						<label class="mv-panel-label">{{ ctrl.label }}</label>
-						<div v-if="ctrl.type === 'checkbox'" class="mv-panel-checkbox-row">
-							<input
-								type="checkbox"
-								:checked="config[ctrl.key]"
-								@change="config[ctrl.key] = $event.target.checked"
-							/>
-						</div>
-						<div v-else-if="ctrl.type === 'slider'" class="mv-panel-slider-row">
-							<input
-								type="range"
-								class="mv-panel-slider"
-								:min="ctrl.min"
-								:max="ctrl.max"
-								:step="ctrl.step"
-								:value="config[ctrl.key]"
-								@input="config[ctrl.key] = Number($event.target.value)"
-							/>
-							<span class="mv-panel-value">{{ config[ctrl.key] }}</span>
+		<template v-if="show_ui">
+			<div class="map-viewer-hud">
+				<span v-if="config.mapViewerShowStats" class="map-viewer-status">{{ status_text }}</span>
+				<button class="map-viewer-close" @click="close" title="Close (Esc)">&#x2715;</button>
+			</div>
+			<div class="mv-panel">
+				<div v-for="section in sections" :key="section.id" class="mv-panel-section">
+					<div class="mv-panel-header" @click="toggle_section(section.id)">
+						<span class="mv-panel-arrow" :class="{ open: open_section === section.id }">&#x25B6;</span>
+						{{ section.label }}
+					</div>
+					<div v-if="open_section === section.id" class="mv-panel-body">
+						<div v-for="ctrl in section.controls" :key="ctrl.key" class="mv-panel-control">
+							<label v-if="ctrl.type === 'checkbox'" class="mv-panel-checkbox-row">
+								<input
+									type="checkbox"
+									:checked="config[ctrl.key]"
+									@change="config[ctrl.key] = $event.target.checked"
+								/>
+								<span class="mv-panel-label">{{ ctrl.label }}</span>
+							</label>
+							<template v-else>
+								<label class="mv-panel-label">{{ ctrl.label }}</label>
+							</template>
+							<div v-if="ctrl.type === 'slider'" class="mv-panel-slider-row">
+								<input
+									type="range"
+									class="mv-panel-slider"
+									:min="ctrl.min"
+									:max="ctrl.max"
+									:step="ctrl.step"
+									:value="config[ctrl.key]"
+									@input="config[ctrl.key] = Number($event.target.value)"
+								/>
+								<span class="mv-panel-value">{{ config[ctrl.key] }}</span>
+							</div>
 						</div>
 					</div>
 				</div>
 			</div>
-		</div>
+			<div class="mv-shortcuts">
+				<span class="mv-shortcut"><kbd>Esc</kbd> Exit Map</span>
+				<span class="mv-shortcut"><kbd>Alt+Z</kbd> Hide UI</span>
+			</div>
+		</template>
 	</div>`,
 
 	data() {
 		return {
 			status_text: 'Initializing...',
+			show_ui: true,
 			open_section: null,
 			sections: SECTIONS
 		};
@@ -95,11 +105,13 @@ module.exports = {
 		this._init_camera();
 		this._start_render_loop();
 
-		this._esc_handler = e => {
+		this._key_handler = e => {
 			if (e.key === 'Escape')
 				this.close();
+			else if (e.altKey && e.key === 'z')
+				this.show_ui = !this.show_ui;
 		};
-		document.addEventListener('keydown', this._esc_handler);
+		document.addEventListener('keydown', this._key_handler);
 
 		await this._init_terrain();
 		this.$refs.canvas?.focus();
@@ -107,7 +119,7 @@ module.exports = {
 
 	beforeUnmount() {
 		this._stop_render_loop();
-		document.removeEventListener('keydown', this._esc_handler);
+		document.removeEventListener('keydown', this._key_handler);
 		this._cleanup();
 	},
 
