@@ -3986,6 +3986,7 @@ input[type=number]::-webkit-outer-spin-button {
 }
 
 .map-viewer-close {
+	margin-left: auto;
 	pointer-events: all;
 	background: rgba(0, 0, 0, 0.5);
 	border: 1px solid rgba(255, 255, 255, 0.2);
