@@ -69,7 +69,7 @@ class FreeCameraControls {
 		this._last_mouse_x = e.clientX;
 		this._last_mouse_y = e.clientY;
 
-		this.yaw += dx * MOUSE_SENSITIVITY;
+		this.yaw -= dx * MOUSE_SENSITIVITY;
 		this.pitch -= dy * MOUSE_SENSITIVITY;
 		this.pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, this.pitch));
 	}
@@ -130,13 +130,13 @@ class FreeCameraControls {
 		}
 
 		if (this._keys.has(KEY_A)) {
-			pos[0] -= right_x * move;
-			pos[2] -= right_z * move;
+			pos[0] += right_x * move;
+			pos[2] += right_z * move;
 		}
 
 		if (this._keys.has(KEY_D)) {
-			pos[0] += right_x * move;
-			pos[2] += right_z * move;
+			pos[0] -= right_x * move;
+			pos[2] -= right_z * move;
 		}
 
 		if (this._keys.has(KEY_Q))
