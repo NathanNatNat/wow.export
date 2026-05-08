@@ -15,6 +15,11 @@ const MAX_CONCURRENT_LOADS = 4;
 const UNLOAD_PADDING = 2;
 const DEFAULT_RENDER_DISTANCE = 8;
 
+// 256 chunks × 145 verts × 24 bytes (pos3f + normal3f)
+const MAX_TILE_VERTEX_BYTES = 256 * 145 * 24;
+// 256 chunks × 768 indices × 2 bytes (uint16)
+const MAX_TILE_INDEX_BYTES = 256 * 768 * 2;
+
 const VERT_SHADER = `#version 300 es
 precision highp float;
 
@@ -84,6 +89,7 @@ class TerrainRenderer {
 		this._last_tx = NaN;
 		this._last_ty = NaN;
 
+		this._vao_pool = [];
 		this._frustum_planes = new Float32Array(24);
 		this._vp_matrix = new Float32Array(16);
 	}
@@ -165,7 +171,7 @@ class TerrainRenderer {
 		// unload tiles beyond unload distance
 		for (const [key, tile] of this._tiles) {
 			if (Math.abs(tile.x - center_tx) > ud || Math.abs(tile.y - center_ty) > ud) {
-				tile.vao.dispose();
+				this._release_vao(tile.vao);
 				this._chunk_count -= tile.chunk_count;
 				this._tiles.delete(key);
 			}
@@ -257,15 +263,14 @@ class TerrainRenderer {
 	}
 
 	_upload_tile(geo) {
-		const vao = new VertexArray(this.ctx);
-		vao.bind();
-		vao.set_vertex_buffer(geo.vertex_data);
-
+		const vao = this._acquire_vao();
 		const gl = this.gl;
-		const stride = 24;
-		vao.set_attribute(0, 3, gl.FLOAT, false, stride, 0);
-		vao.set_attribute(1, 3, gl.FLOAT, false, stride, 12);
-		vao.set_index_buffer(geo.index_data);
+
+		vao.bind();
+		gl.bindBuffer(gl.ARRAY_BUFFER, vao.vbo);
+		gl.bufferSubData(gl.ARRAY_BUFFER, 0, geo.vertex_data);
+		gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vao.ebo);
+		gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, geo.index_data);
 
 		return {
 			vao,
@@ -277,6 +282,36 @@ class TerrainRenderer {
 			bounds_min: geo.bounds_min,
 			bounds_max: geo.bounds_max
 		};
+	}
+
+	_acquire_vao() {
+		if (this._vao_pool.length > 0)
+			return this._vao_pool.pop();
+
+		const vao = new VertexArray(this.ctx);
+		const gl = this.gl;
+		vao.bind();
+
+		vao.vbo = gl.createBuffer();
+		gl.bindBuffer(gl.ARRAY_BUFFER, vao.vbo);
+		gl.bufferData(gl.ARRAY_BUFFER, MAX_TILE_VERTEX_BYTES, gl.DYNAMIC_DRAW);
+
+		const stride = 24;
+		gl.enableVertexAttribArray(0);
+		gl.vertexAttribPointer(0, 3, gl.FLOAT, false, stride, 0);
+		gl.enableVertexAttribArray(1);
+		gl.vertexAttribPointer(1, 3, gl.FLOAT, false, stride, 12);
+
+		vao.ebo = gl.createBuffer();
+		gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vao.ebo);
+		gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, MAX_TILE_INDEX_BYTES, gl.DYNAMIC_DRAW);
+		vao.index_type = gl.UNSIGNED_SHORT;
+
+		return vao;
+	}
+
+	_release_vao(vao) {
+		this._vao_pool.push(vao);
 	}
 
 	_build_tile_geometry(adt, tx, ty) {
@@ -547,6 +582,11 @@ class TerrainRenderer {
 			tile.vao.dispose();
 
 		this._tiles.clear();
+
+		for (const vao of this._vao_pool)
+			vao.dispose();
+
+		this._vao_pool.length = 0;
 
 		if (this.shader) {
 			this.shader.dispose();
