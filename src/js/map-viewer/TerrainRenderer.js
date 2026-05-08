@@ -70,6 +70,9 @@ class TerrainRenderer {
 		this.vao = null;
 		this.tile_count = 0;
 		this._pending_tiles = [];
+		this._tile_ranges = [];
+		this._frustum_planes = new Float32Array(24);
+		this._vp_matrix = new Float32Array(16);
 		this.bounds = {
 			min: [Infinity, Infinity, Infinity],
 			max: [-Infinity, -Infinity, -Infinity]
@@ -160,12 +163,22 @@ class TerrainRenderer {
 		let idx_write = 0;
 		let base_vertex = 0;
 
+		this._tile_ranges = [];
+
 		for (const geo of pending) {
 			vertex_data.set(geo.vertex_data, vert_write);
 			vert_write += geo.vertex_data.length;
 
+			const range_start = idx_write;
 			for (let i = 0; i < geo.index_count; i++)
 				index_data[idx_write++] = geo.index_data[i] + base_vertex;
+
+			this._tile_ranges.push({
+				index_offset: range_start,
+				index_count: geo.index_count,
+				bounds_min: geo.bounds_min,
+				bounds_max: geo.bounds_max
+			});
 
 			base_vertex += geo.vertex_data.length / 6;
 		}
@@ -196,6 +209,9 @@ class TerrainRenderer {
 		const vert_count = chunk_count * 145;
 		const vertex_data = new Float32Array(vert_count * 6);
 		const index_data = new Uint16Array(chunk_count * 768);
+
+		const tile_min = [Infinity, Infinity, Infinity];
+		const tile_max = [-Infinity, -Infinity, -Infinity];
 
 		let vert_offset = 0;
 		let chunk_vert_base = 0;
@@ -237,7 +253,7 @@ class TerrainRenderer {
 							vertex_data[di + 4] = 1;
 						}
 
-						// update bounds
+						// update global bounds
 						const b = this.bounds;
 						if (vx < b.min[0]) b.min[0] = vx;
 						if (vy < b.min[1]) b.min[1] = vy;
@@ -245,6 +261,14 @@ class TerrainRenderer {
 						if (vx > b.max[0]) b.max[0] = vx;
 						if (vy > b.max[1]) b.max[1] = vy;
 						if (vz > b.max[2]) b.max[2] = vz;
+
+						// update tile bounds
+						if (vx < tile_min[0]) tile_min[0] = vx;
+						if (vy < tile_min[1]) tile_min[1] = vy;
+						if (vz < tile_min[2]) tile_min[2] = vz;
+						if (vx > tile_max[0]) tile_max[0] = vx;
+						if (vy > tile_max[1]) tile_max[1] = vy;
+						if (vz > tile_max[2]) tile_max[2] = vz;
 
 						vert_offset++;
 						idx++;
@@ -279,7 +303,9 @@ class TerrainRenderer {
 		return {
 			vertex_data,
 			index_data,
-			index_count: idx_offset
+			index_count: idx_offset,
+			bounds_min: tile_min,
+			bounds_max: tile_max
 		};
 	}
 
@@ -300,8 +326,76 @@ class TerrainRenderer {
 		this.shader.set_uniform_mat4('u_view', false, view_matrix);
 		this.shader.set_uniform_mat4('u_projection', false, projection_matrix);
 
+		this._compute_frustum(view_matrix, projection_matrix);
+
+		const gl = this.gl;
 		this.vao.bind();
-		this.vao.draw(this.gl.TRIANGLES);
+
+		for (const range of this._tile_ranges) {
+			if (this._is_aabb_visible(range.bounds_min, range.bounds_max))
+				this.vao.draw(gl.TRIANGLES, range.index_count, range.index_offset);
+		}
+	}
+
+	_compute_frustum(view, proj) {
+		// multiply projection * view (column-major)
+		const vp = this._vp_matrix;
+		for (let i = 0; i < 4; i++) {
+			for (let j = 0; j < 4; j++) {
+				vp[j * 4 + i] =
+					proj[i] * view[j * 4] +
+					proj[4 + i] * view[j * 4 + 1] +
+					proj[8 + i] * view[j * 4 + 2] +
+					proj[12 + i] * view[j * 4 + 3];
+			}
+		}
+
+		// extract 6 frustum planes (Gribb-Hartmann)
+		const p = this._frustum_planes;
+
+		// left: row3 + row0
+		p[0] = vp[3] + vp[0]; p[1] = vp[7] + vp[4]; p[2] = vp[11] + vp[8]; p[3] = vp[15] + vp[12];
+		// right: row3 - row0
+		p[4] = vp[3] - vp[0]; p[5] = vp[7] - vp[4]; p[6] = vp[11] - vp[8]; p[7] = vp[15] - vp[12];
+		// bottom: row3 + row1
+		p[8] = vp[3] + vp[1]; p[9] = vp[7] + vp[5]; p[10] = vp[11] + vp[9]; p[11] = vp[15] + vp[13];
+		// top: row3 - row1
+		p[12] = vp[3] - vp[1]; p[13] = vp[7] - vp[5]; p[14] = vp[11] - vp[9]; p[15] = vp[15] - vp[13];
+		// near: row3 + row2
+		p[16] = vp[3] + vp[2]; p[17] = vp[7] + vp[6]; p[18] = vp[11] + vp[10]; p[19] = vp[15] + vp[14];
+		// far: row3 - row2
+		p[20] = vp[3] - vp[2]; p[21] = vp[7] - vp[6]; p[22] = vp[11] - vp[10]; p[23] = vp[15] - vp[14];
+
+		// normalize each plane
+		for (let i = 0; i < 6; i++) {
+			const o = i * 4;
+			const len = Math.sqrt(p[o] * p[o] + p[o + 1] * p[o + 1] + p[o + 2] * p[o + 2]);
+			if (len > 0) {
+				p[o] /= len;
+				p[o + 1] /= len;
+				p[o + 2] /= len;
+				p[o + 3] /= len;
+			}
+		}
+	}
+
+	_is_aabb_visible(bmin, bmax) {
+		const p = this._frustum_planes;
+
+		for (let i = 0; i < 6; i++) {
+			const o = i * 4;
+			const a = p[o], b = p[o + 1], c = p[o + 2], d = p[o + 3];
+
+			// p-vertex: corner most aligned with the plane normal
+			const px = a >= 0 ? bmax[0] : bmin[0];
+			const py = b >= 0 ? bmax[1] : bmin[1];
+			const pz = c >= 0 ? bmax[2] : bmin[2];
+
+			if (a * px + b * py + c * pz + d < 0)
+				return false;
+		}
+
+		return true;
 	}
 
 	dispose() {
