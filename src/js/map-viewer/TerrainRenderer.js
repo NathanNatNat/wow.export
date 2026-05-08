@@ -216,7 +216,7 @@ class TerrainRenderer {
 			try {
 				const px = info.x.toString().padStart(2, '0');
 				const py = info.y.toString().padStart(2, '0');
-				const blp_path = 'world/minimaps/' + this._map_dir + '/map' + px + '_' + py + '.blp';
+				const blp_path = 'world/minimaps/' + this._map_dir + '/map' + py + '_' + px + '.blp';
 				const blp_data = await this._casc.getFileByName(blp_path, false, true);
 				if (blp_data)
 					minimap_blp = new BLPFile(blp_data);
@@ -394,7 +394,7 @@ class TerrainRenderer {
 						// v decreases with row (bake formula: v = (vz - origin) / TILE_SIZE, vz decreases with row)
 						const col_frac = is_short ? (col + 0.5) / 8 : col / 8;
 						vertex_data[di + 6] = (y + col_frac) / 16;
-						vertex_data[di + 7] = 1.0 - (x + row / 16) / 16;
+						vertex_data[di + 7] = (x + row / 16) / 16;
 
 						if (vx < tile_min[0]) tile_min[0] = vx;
 						if (vy < tile_min[1]) tile_min[1] = vy;
