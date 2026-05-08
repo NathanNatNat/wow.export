@@ -4,6 +4,8 @@ const ADTLoader = require('../3D/loaders/ADTLoader');
 const WDTLoader = require('../3D/loaders/WDTLoader');
 const Shaders = require('../3D/Shaders');
 const VertexArray = require('../3D/gl/VertexArray');
+const GLTexture = require('../3D/gl/GLTexture');
+const BLPFile = require('../casc/blp');
 
 const MAP_SIZE = constants.GAME.MAP_SIZE;
 const TILE_SIZE = constants.GAME.TILE_SIZE;
@@ -15,9 +17,9 @@ const MAX_CONCURRENT_LOADS = 4;
 const UNLOAD_PADDING = 2;
 const DEFAULT_RENDER_DISTANCE = 8;
 
-// 256 chunks × 145 verts × 24 bytes (pos3f + normal3f)
-const MAX_TILE_VERTEX_BYTES = 256 * 145 * 24;
-// 256 chunks × 768 indices × 2 bytes (uint16)
+// 256 chunks x 145 verts x 32 bytes (pos3f + normal3f + uv2f)
+const MAX_TILE_VERTEX_BYTES = 256 * 145 * 32;
+// 256 chunks x 768 indices x 2 bytes (uint16)
 const MAX_TILE_INDEX_BYTES = 256 * 768 * 2;
 // wireframe: each triangle (3 indices) becomes 3 line pairs (6 indices)
 const MAX_TILE_WIRE_INDEX_BYTES = MAX_TILE_INDEX_BYTES * 2;
@@ -28,6 +30,7 @@ class TerrainRenderer {
 		this.gl = gl_context.gl;
 		this.shader = Shaders.create_program(gl_context, 'mpv_terrain');
 		this.wire_shader = Shaders.create_program(gl_context, 'mpv_terrain_wire');
+		this.minimap_shader = Shaders.create_program(gl_context, 'mpv_terrain_minimap');
 		this.render_distance = DEFAULT_RENDER_DISTANCE;
 		this.map_center = [0, 0, 0];
 
@@ -37,6 +40,7 @@ class TerrainRenderer {
 		this._load_queue = [];
 		this._upload_queue = [];
 		this._casc = null;
+		this._map_dir = null;
 		this._chunk_count = 0;
 		this._disposed = false;
 
@@ -70,6 +74,7 @@ class TerrainRenderer {
 
 	async init(map_dir) {
 		this._casc = core.view.casc;
+		this._map_dir = map_dir;
 		const prefix = 'world/maps/' + map_dir + '/' + map_dir;
 
 		const wdt_file = await this._casc.getFileByName(prefix + '.wdt');
@@ -133,6 +138,9 @@ class TerrainRenderer {
 		// unload tiles beyond unload distance
 		for (const [key, tile] of this._tiles) {
 			if (Math.abs(tile.x - center_tx) > ud || Math.abs(tile.y - center_ty) > ud) {
+				if (tile.minimap_tex)
+					tile.minimap_tex.dispose();
+
 				this._release_vao(tile.vao);
 				this._chunk_count -= tile.chunk_count;
 				this._tiles.delete(key);
@@ -198,10 +206,28 @@ class TerrainRenderer {
 				return this._pump_load_queue();
 
 			const geo = this._build_tile_geometry(adt, info.x, info.y);
-			if (geo)
-				this._upload_queue.push({ key, geo });
-			else
+			if (!geo) {
 				this._loading.delete(key);
+				return;
+			}
+
+			// load minimap texture alongside geometry
+			let minimap_blp = null;
+			try {
+				const px = info.x.toString().padStart(2, '0');
+				const py = info.y.toString().padStart(2, '0');
+				const blp_path = 'world/minimaps/' + this._map_dir + '/map' + px + '_' + py + '.blp';
+				const blp_data = await this._casc.getFileByName(blp_path, false, true);
+				if (blp_data)
+					minimap_blp = new BLPFile(blp_data);
+			} catch {
+				// minimap not available for this tile
+			}
+
+			if (!this._loading.has(key))
+				return this._pump_load_queue();
+
+			this._upload_queue.push({ key, geo, minimap_blp });
 		} catch (e) {
 			this._loading.delete(key);
 		}
@@ -211,20 +237,20 @@ class TerrainRenderer {
 
 	_process_uploads(budget = 1) {
 		while (budget-- > 0 && this._upload_queue.length > 0) {
-			const { key, geo } = this._upload_queue.shift();
+			const { key, geo, minimap_blp } = this._upload_queue.shift();
 
 			if (!this._loading.has(key))
 				continue;
 
 			this._loading.delete(key);
 
-			const tile = this._upload_tile(geo);
+			const tile = this._upload_tile(geo, minimap_blp);
 			this._tiles.set(key, tile);
 			this._chunk_count += tile.chunk_count;
 		}
 	}
 
-	_upload_tile(geo) {
+	_upload_tile(geo, minimap_blp) {
 		const vao = this._acquire_vao();
 		const gl = this.gl;
 
@@ -241,8 +267,15 @@ class TerrainRenderer {
 		// restore triangle EBO in VAO state
 		gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vao.ebo);
 
+		let minimap_tex = null;
+		if (minimap_blp) {
+			minimap_tex = new GLTexture(this.ctx);
+			minimap_tex.set_blp(minimap_blp);
+		}
+
 		return {
 			vao,
+			minimap_tex,
 			chunk_bounds: geo.chunk_bounds,
 			chunk_draw: geo.chunk_draw,
 			chunk_count: geo.chunk_count,
@@ -265,11 +298,13 @@ class TerrainRenderer {
 		gl.bindBuffer(gl.ARRAY_BUFFER, vao.vbo);
 		gl.bufferData(gl.ARRAY_BUFFER, MAX_TILE_VERTEX_BYTES, gl.DYNAMIC_DRAW);
 
-		const stride = 24;
+		const stride = 32;
 		gl.enableVertexAttribArray(0);
 		gl.vertexAttribPointer(0, 3, gl.FLOAT, false, stride, 0);
 		gl.enableVertexAttribArray(1);
 		gl.vertexAttribPointer(1, 3, gl.FLOAT, false, stride, 12);
+		gl.enableVertexAttribArray(2);
+		gl.vertexAttribPointer(2, 2, gl.FLOAT, false, stride, 24);
 
 		vao.ebo = gl.createBuffer();
 		gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vao.ebo);
@@ -301,7 +336,7 @@ class TerrainRenderer {
 			return null;
 
 		const vert_count = valid_chunks * 145;
-		const vertex_data = new Float32Array(vert_count * 6);
+		const vertex_data = new Float32Array(vert_count * 8);
 		const index_data = new Uint16Array(valid_chunks * 768);
 
 		const chunk_bounds = new Float32Array(valid_chunks * 6);
@@ -340,7 +375,7 @@ class TerrainRenderer {
 						if (is_short)
 							vx -= UNIT_SIZE_HALF;
 
-						const di = vert_offset * 6;
+						const di = vert_offset * 8;
 						vertex_data[di] = vx;
 						vertex_data[di + 1] = vy;
 						vertex_data[di + 2] = vz;
@@ -353,6 +388,11 @@ class TerrainRenderer {
 						} else {
 							vertex_data[di + 4] = 1;
 						}
+
+						// uv: map vertex to [0,1] across the tile
+						const col_frac = is_short ? (col + 0.5) / 8 : col / 8;
+						vertex_data[di + 6] = (y + col_frac) / 16;
+						vertex_data[di + 7] = (x + row / 16) / 16;
 
 						if (vx < tile_min[0]) tile_min[0] = vx;
 						if (vy < tile_min[1]) tile_min[1] = vy;
@@ -500,6 +540,34 @@ class TerrainRenderer {
 		return visible;
 	}
 
+	render_minimap(view_matrix, projection_matrix) {
+		if (!this.minimap_shader.is_valid() || this._tiles.size === 0)
+			return 0;
+
+		this.minimap_shader.use();
+		this.minimap_shader.set_uniform_mat4('u_view', false, view_matrix);
+		this.minimap_shader.set_uniform_mat4('u_projection', false, projection_matrix);
+		this.minimap_shader.set_uniform_1i('u_minimap', 0);
+
+		this._compute_frustum(view_matrix, projection_matrix);
+
+		const gl = this.gl;
+		const planes = this._frustum_planes;
+		let visible = 0;
+
+		for (const tile of this._tiles.values()) {
+			if (!tile.minimap_tex || !this._is_tile_visible(tile, planes))
+				continue;
+
+			tile.minimap_tex.bind(0);
+			tile.vao.bind();
+			gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tile.vao.ebo);
+			visible += this._draw_tile_batched(tile, planes, gl.TRIANGLES, false);
+		}
+
+		return visible;
+	}
+
 	_draw_tile_batched(tile, planes, mode, is_wireframe) {
 		const gl = this.gl;
 		const bounds = tile.chunk_bounds;
@@ -614,8 +682,12 @@ class TerrainRenderer {
 		this._load_queue.length = 0;
 		this._upload_queue.length = 0;
 
-		for (const tile of this._tiles.values())
+		for (const tile of this._tiles.values()) {
+			if (tile.minimap_tex)
+				tile.minimap_tex.dispose();
+
 			tile.vao.dispose();
+		}
 
 		this._tiles.clear();
 
@@ -634,6 +706,12 @@ class TerrainRenderer {
 			Shaders.unregister(this.wire_shader);
 			this.wire_shader.dispose();
 			this.wire_shader = null;
+		}
+
+		if (this.minimap_shader) {
+			Shaders.unregister(this.minimap_shader);
+			this.minimap_shader.dispose();
+			this.minimap_shader = null;
 		}
 	}
 }

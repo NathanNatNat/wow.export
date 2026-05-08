@@ -261,6 +261,23 @@ class BLPImage {
 	}
 
 	/**
+	 * Get all raw mipmap levels for GPU compressed upload.
+	 * @returns {Array<{data: Uint8Array, width: number, height: number}>}
+	 */
+	get_raw_mipmaps() {
+		const mipmaps = [];
+		for (let i = 0; i < this.mapCount; i++) {
+			this._prepare(i);
+			mipmaps.push({
+				data: new Uint8Array(this.rawData),
+				width: this.scaledWidth,
+				height: this.scaledHeight
+			});
+		}
+		return mipmaps;
+	}
+
+	/**
 	 * Get the contents of this BLP as an RGBA UInt8 array.
 	 * @param {number} mipmap 
 	 * @param {number} mask

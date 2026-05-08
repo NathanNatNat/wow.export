@@ -151,17 +151,27 @@ class GLTexture {
 	set_blp(blp, flags = {}) {
 		const gl = this.gl;
 
-		// determine wrap mode from flags
 		const wrap_s = (flags.wrap_s ?? (flags.flags & 0x1)) ? gl.REPEAT : gl.CLAMP_TO_EDGE;
 		const wrap_t = (flags.wrap_t ?? (flags.flags & 0x2)) ? gl.REPEAT : gl.CLAMP_TO_EDGE;
+		this.has_alpha = blp.alphaDepth > 0;
 
-		// for now, always decode to RGBA
-		// todo: support compressed textures when format issues are resolved
+		// prefer compressed GPU upload when S3TC is available
+		if (blp.encoding === 2 && this.ctx.ext_s3tc) {
+			const format = blp.alphaDepth > 1
+				? (blp.alphaEncoding === 7 ? GLTexture.DXT5 : GLTexture.DXT3)
+				: (this.has_alpha ? GLTexture.DXT1_RGBA : GLTexture.DXT1_RGB);
+
+			this.set_compressed(blp.get_raw_mipmaps(), format);
+			this._apply_wrap(wrap_s, wrap_t);
+			return;
+		}
+
+		// fallback: decode to RGBA on CPU
 		const pixels = blp.toUInt8Array(0, 0b1111);
 		this.set_rgba(pixels, blp.width, blp.height, {
-			wrap_s: wrap_s,
-			wrap_t: wrap_t,
-			has_alpha: blp.alphaDepth > 0,
+			wrap_s,
+			wrap_t,
+			has_alpha: this.has_alpha,
 			generate_mipmaps: true
 		});
 	}
