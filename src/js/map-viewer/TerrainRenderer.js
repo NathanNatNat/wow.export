@@ -347,7 +347,7 @@ class TerrainRenderer {
 
 	render(view_matrix, projection_matrix) {
 		if (!this.shader.is_valid() || !this.vao)
-			return;
+			return 0;
 
 		this.shader.use();
 		this.shader.set_uniform_mat4('u_view', false, view_matrix);
