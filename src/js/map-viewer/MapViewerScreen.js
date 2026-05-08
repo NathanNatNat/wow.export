@@ -125,7 +125,7 @@ module.exports = {
 				});
 
 				this._position_camera();
-				this.status_text = this._terrain.tiles.size + ' tiles loaded';
+				this.status_text = this._terrain.tile_count + ' tiles loaded';
 			} catch (e) {
 				this.status_text = 'Error: ' + e.message;
 			}

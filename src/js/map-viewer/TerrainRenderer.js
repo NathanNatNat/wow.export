@@ -67,7 +67,9 @@ class TerrainRenderer {
 		this.ctx = gl_context;
 		this.gl = gl_context.gl;
 		this.shader = new ShaderProgram(gl_context, VERT_SHADER, FRAG_SHADER);
-		this.tiles = new Map();
+		this.vao = null;
+		this.tile_count = 0;
+		this._pending_tiles = [];
 		this.bounds = {
 			min: [Infinity, Infinity, Infinity],
 			max: [-Infinity, -Infinity, -Infinity]
@@ -111,7 +113,7 @@ class TerrainRenderer {
 		for (let i = 0; i < tile_infos.length; i += BATCH_SIZE) {
 			const batch = tile_infos.slice(i, i + BATCH_SIZE);
 			await Promise.all(batch.map(info =>
-				this._load_tile(casc, info.root_id, info.index)
+				this._load_tile(casc, info.root_id)
 					.catch(() => {})
 					.then(() => {
 						loaded++;
@@ -120,9 +122,11 @@ class TerrainRenderer {
 					})
 			));
 		}
+
+		this._build_merged_vao();
 	}
 
-	async _load_tile(casc, root_file_id, tile_index) {
+	async _load_tile(casc, root_file_id) {
 		const root_file = await casc.getFile(root_file_id);
 		const adt = new ADTLoader(root_file);
 		adt.loadRoot();
@@ -131,20 +135,54 @@ class TerrainRenderer {
 		if (geo.index_count === 0)
 			return;
 
+		this._pending_tiles.push(geo);
+	}
+
+	_build_merged_vao() {
+		const pending = this._pending_tiles;
+		this.tile_count = pending.length;
+
+		if (pending.length === 0)
+			return;
+
+		let total_floats = 0;
+		let total_indices = 0;
+
+		for (const geo of pending) {
+			total_floats += geo.vertex_data.length;
+			total_indices += geo.index_count;
+		}
+
+		const vertex_data = new Float32Array(total_floats);
+		const index_data = new Uint32Array(total_indices);
+
+		let vert_write = 0;
+		let idx_write = 0;
+		let base_vertex = 0;
+
+		for (const geo of pending) {
+			vertex_data.set(geo.vertex_data, vert_write);
+			vert_write += geo.vertex_data.length;
+
+			for (let i = 0; i < geo.index_count; i++)
+				index_data[idx_write++] = geo.index_data[i] + base_vertex;
+
+			base_vertex += geo.vertex_data.length / 6;
+		}
+
+		this._pending_tiles.length = 0;
+
 		const vao = new VertexArray(this.ctx);
 		vao.bind();
-		vao.set_vertex_buffer(geo.vertex_data);
+		vao.set_vertex_buffer(vertex_data);
 
 		const gl = this.gl;
 		const stride = 24;
-
-		// position (location 0)
 		vao.set_attribute(0, 3, gl.FLOAT, false, stride, 0);
-		// normal (location 1)
 		vao.set_attribute(1, 3, gl.FLOAT, false, stride, 12);
+		vao.set_index_buffer(index_data);
 
-		vao.set_index_buffer(geo.index_data);
-		this.tiles.set(tile_index, vao);
+		this.vao = vao;
 	}
 
 	_build_tile_geometry(adt) {
@@ -255,25 +293,22 @@ class TerrainRenderer {
 	}
 
 	render(view_matrix, projection_matrix) {
-		if (!this.shader.is_valid() || this.tiles.size === 0)
+		if (!this.shader.is_valid() || !this.vao)
 			return;
 
 		this.shader.use();
 		this.shader.set_uniform_mat4('u_view', false, view_matrix);
 		this.shader.set_uniform_mat4('u_projection', false, projection_matrix);
 
-		const gl = this.gl;
-		for (const vao of this.tiles.values()) {
-			vao.bind();
-			vao.draw(gl.TRIANGLES);
-		}
+		this.vao.bind();
+		this.vao.draw(this.gl.TRIANGLES);
 	}
 
 	dispose() {
-		for (const vao of this.tiles.values())
-			vao.dispose();
-
-		this.tiles.clear();
+		if (this.vao) {
+			this.vao.dispose();
+			this.vao = null;
+		}
 
 		if (this.shader) {
 			this.shader.dispose();
