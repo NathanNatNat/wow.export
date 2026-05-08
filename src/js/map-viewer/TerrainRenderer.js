@@ -231,7 +231,7 @@ class TerrainRenderer {
 
 		return {
 			vertex_data,
-			index_data: new Uint32Array(indices),
+			index_data: new Uint16Array(indices),
 			index_count: indices.length
 		};
 	}
