@@ -19,12 +19,15 @@ const DEFAULT_RENDER_DISTANCE = 8;
 const MAX_TILE_VERTEX_BYTES = 256 * 145 * 24;
 // 256 chunks × 768 indices × 2 bytes (uint16)
 const MAX_TILE_INDEX_BYTES = 256 * 768 * 2;
+// wireframe: each triangle (3 indices) becomes 3 line pairs (6 indices)
+const MAX_TILE_WIRE_INDEX_BYTES = MAX_TILE_INDEX_BYTES * 2;
 
 class TerrainRenderer {
 	constructor(gl_context) {
 		this.ctx = gl_context;
 		this.gl = gl_context.gl;
 		this.shader = Shaders.create_program(gl_context, 'mpv_terrain');
+		this.wire_shader = Shaders.create_program(gl_context, 'mpv_terrain_wire');
 		this.render_distance = DEFAULT_RENDER_DISTANCE;
 		this.map_center = [0, 0, 0];
 
@@ -231,6 +234,13 @@ class TerrainRenderer {
 		gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vao.ebo);
 		gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, geo.index_data);
 
+		const wire_indices = VertexArray.triangles_to_lines(geo.index_data);
+		gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vao.wireframe_ebo);
+		gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, wire_indices);
+
+		// restore triangle EBO in VAO state
+		gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vao.ebo);
+
 		return {
 			vao,
 			chunk_bounds: geo.chunk_bounds,
@@ -265,6 +275,13 @@ class TerrainRenderer {
 		gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vao.ebo);
 		gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, MAX_TILE_INDEX_BYTES, gl.DYNAMIC_DRAW);
 		vao.index_type = gl.UNSIGNED_SHORT;
+
+		vao.wireframe_ebo = gl.createBuffer();
+		gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vao.wireframe_ebo);
+		gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, MAX_TILE_WIRE_INDEX_BYTES, gl.DYNAMIC_DRAW);
+
+		// restore triangle EBO in VAO state
+		gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vao.ebo);
 
 		return vao;
 	}
@@ -427,40 +444,99 @@ class TerrainRenderer {
 				continue;
 
 			tile.vao.bind();
+			gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tile.vao.ebo);
+			visible += this._draw_tile_batched(tile, planes, gl.TRIANGLES, false);
+		}
 
-			const bounds = tile.chunk_bounds;
-			const draw = tile.chunk_draw;
-			let batch_start = -1;
-			let batch_count = 0;
+		return visible;
+	}
 
-			for (let i = 0; i < tile.chunk_count; i++) {
-				const bo = i * 6;
-				const dw = i * 2;
+	render_wireframe(view_matrix, projection_matrix, wire_color, sky_color, occlusion) {
+		if (!this.wire_shader.is_valid() || this._tiles.size === 0)
+			return 0;
 
-				if (this._is_aabb_visible(bounds, bo, planes)) {
-					visible++;
-					const offset = draw[dw];
-					const idx_count = draw[dw + 1];
+		this._compute_frustum(view_matrix, projection_matrix);
 
-					if (batch_start === -1) {
-						batch_start = offset;
-						batch_count = idx_count;
-					} else if (offset === batch_start + batch_count) {
-						batch_count += idx_count;
-					} else {
-						tile.vao.draw(gl.TRIANGLES, batch_count, batch_start);
-						batch_start = offset;
-						batch_count = idx_count;
-					}
-				} else if (batch_start !== -1) {
-					tile.vao.draw(gl.TRIANGLES, batch_count, batch_start);
-					batch_start = -1;
-				}
+		const gl = this.gl;
+		const planes = this._frustum_planes;
+		let visible = 0;
+
+		this.wire_shader.use();
+		this.wire_shader.set_uniform_mat4('u_view', false, view_matrix);
+		this.wire_shader.set_uniform_mat4('u_projection', false, projection_matrix);
+
+		if (occlusion) {
+			// solid fill pass: populate depth buffer with sky-coloured triangles
+			// so wireframe lines behind terrain are depth-rejected
+			this.wire_shader.set_uniform_3fv('u_terrain_color', sky_color);
+
+			gl.enable(gl.POLYGON_OFFSET_FILL);
+			gl.polygonOffset(1, 1);
+
+			for (const tile of this._tiles.values()) {
+				if (!this._is_tile_visible(tile, planes))
+					continue;
+
+				tile.vao.bind();
+				gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tile.vao.ebo);
+				this._draw_tile_batched(tile, planes, gl.TRIANGLES, false);
 			}
 
-			if (batch_start !== -1)
-				tile.vao.draw(gl.TRIANGLES, batch_count, batch_start);
+			gl.disable(gl.POLYGON_OFFSET_FILL);
 		}
+
+		// wireframe pass
+		this.wire_shader.set_uniform_3fv('u_terrain_color', wire_color);
+
+		for (const tile of this._tiles.values()) {
+			if (!this._is_tile_visible(tile, planes))
+				continue;
+
+			tile.vao.bind();
+			gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tile.vao.wireframe_ebo);
+			visible += this._draw_tile_batched(tile, planes, gl.LINES, true);
+		}
+
+		return visible;
+	}
+
+	_draw_tile_batched(tile, planes, mode, is_wireframe) {
+		const gl = this.gl;
+		const bounds = tile.chunk_bounds;
+		const draw = tile.chunk_draw;
+		const scale = is_wireframe ? 2 : 1;
+
+		let batch_start = -1;
+		let batch_count = 0;
+		let visible = 0;
+
+		for (let i = 0; i < tile.chunk_count; i++) {
+			const bo = i * 6;
+			const dw = i * 2;
+
+			if (this._is_aabb_visible(bounds, bo, planes)) {
+				visible++;
+				const offset = draw[dw] * scale;
+				const idx_count = draw[dw + 1] * scale;
+
+				if (batch_start === -1) {
+					batch_start = offset;
+					batch_count = idx_count;
+				} else if (offset === batch_start + batch_count) {
+					batch_count += idx_count;
+				} else {
+					gl.drawElements(mode, batch_count, gl.UNSIGNED_SHORT, batch_start * 2);
+					batch_start = offset;
+					batch_count = idx_count;
+				}
+			} else if (batch_start !== -1) {
+				gl.drawElements(mode, batch_count, gl.UNSIGNED_SHORT, batch_start * 2);
+				batch_start = -1;
+			}
+		}
+
+		if (batch_start !== -1)
+			gl.drawElements(mode, batch_count, gl.UNSIGNED_SHORT, batch_start * 2);
 
 		return visible;
 	}
@@ -552,6 +628,12 @@ class TerrainRenderer {
 			Shaders.unregister(this.shader);
 			this.shader.dispose();
 			this.shader = null;
+		}
+
+		if (this.wire_shader) {
+			Shaders.unregister(this.wire_shader);
+			this.wire_shader.dispose();
+			this.wire_shader = null;
 		}
 	}
 }

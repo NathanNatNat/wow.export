@@ -20,8 +20,17 @@ const SECTIONS = [
 		label: 'Rendering',
 		controls: [
 			{ type: 'slider', key: 'mapViewerRenderDistance', label: 'Render Distance', min: 1, max: 256, step: 1 },
-			{ type: 'color', key: 'mapViewerSkyColor', label: 'Sky Colour' },
-			{ type: 'color', key: 'mapViewerTerrainColor', label: 'Terrain Colour' }
+			{ type: 'color', key: 'mapViewerSkyColor', label: 'Sky Colour' }
+		]
+	},
+	{
+		id: 'terrain',
+		label: 'Terrain',
+		controls: [
+			{ type: 'dropdown', data_key: 'texture_mode', label: 'Texture Mode', options: ['Flat', 'Wireframe'] },
+			{ type: 'color', key: 'mapViewerTerrainColor', label: 'Terrain Colour', visible_mode: 'Flat' },
+			{ type: 'color', key: 'mapViewerWireframeColor', label: 'Wireframe Colour', visible_mode: 'Wireframe' },
+			{ type: 'checkbox', key: 'mapViewerWireframeOcclusion', label: 'Depth Occlusion', visible_mode: 'Wireframe' }
 		]
 	},
 	{
@@ -59,41 +68,49 @@ module.exports = {
 						{{ section.label }}
 					</div>
 					<div v-if="open_section === section.id" class="mv-panel-body">
-						<div v-for="ctrl in section.controls" :key="ctrl.key" class="mv-panel-control">
-							<label v-if="ctrl.type === 'checkbox'" class="mv-panel-checkbox-row">
-								<input
-									type="checkbox"
-									:checked="config[ctrl.key]"
-									@change="config[ctrl.key] = $event.target.checked"
-								/>
-								<span class="mv-panel-label">{{ ctrl.label }}</span>
-							</label>
-							<template v-else-if="ctrl.type === 'slider'">
-								<label class="mv-panel-label">{{ ctrl.label }}</label>
-							</template>
-							<div v-if="ctrl.type === 'slider'" class="mv-panel-slider-row">
-								<input
-									type="range"
-									class="mv-panel-slider"
-									:min="ctrl.min"
-									:max="ctrl.max"
-									:step="ctrl.step"
-									:value="config[ctrl.key]"
-									@input="config[ctrl.key] = Number($event.target.value)"
-								/>
-								<span class="mv-panel-value">{{ config[ctrl.key] }}</span>
-							</div>
-							<div v-if="ctrl.type === 'color'" class="mv-panel-color-row">
-								<label class="mv-panel-label">{{ ctrl.label }}</label>
-								<div class="mv-panel-color-swatch" :style="{ background: config[ctrl.key] }" @click="open_picker($event)">
+						<template v-for="ctrl in section.controls" :key="ctrl.key || ctrl.data_key">
+							<div v-if="is_ctrl_visible(ctrl)" class="mv-panel-control">
+								<label v-if="ctrl.type === 'checkbox'" class="mv-panel-checkbox-row">
 									<input
-										type="color"
-										:value="config[ctrl.key]"
-										@input="config[ctrl.key] = $event.target.value"
+										type="checkbox"
+										:checked="config[ctrl.key]"
+										@change="config[ctrl.key] = $event.target.checked"
 									/>
+									<span class="mv-panel-label">{{ ctrl.label }}</span>
+								</label>
+								<template v-else-if="ctrl.type === 'slider'">
+									<label class="mv-panel-label">{{ ctrl.label }}</label>
+								</template>
+								<div v-if="ctrl.type === 'slider'" class="mv-panel-slider-row">
+									<input
+										type="range"
+										class="mv-panel-slider"
+										:min="ctrl.min"
+										:max="ctrl.max"
+										:step="ctrl.step"
+										:value="config[ctrl.key]"
+										@input="config[ctrl.key] = Number($event.target.value)"
+									/>
+									<span class="mv-panel-value">{{ config[ctrl.key] }}</span>
+								</div>
+								<div v-if="ctrl.type === 'color'" class="mv-panel-color-row">
+									<label class="mv-panel-label">{{ ctrl.label }}</label>
+									<div class="mv-panel-color-swatch" :style="{ background: config[ctrl.key] }" @click="open_picker($event)">
+										<input
+											type="color"
+											:value="config[ctrl.key]"
+											@input="config[ctrl.key] = $event.target.value"
+										/>
+									</div>
+								</div>
+								<div v-if="ctrl.type === 'dropdown'" class="mv-panel-dropdown-row">
+									<label class="mv-panel-label">{{ ctrl.label }}</label>
+									<select class="mv-panel-dropdown" :value="get_ctrl_value(ctrl)" @change="set_ctrl_value(ctrl, $event.target.value)">
+										<option v-for="opt in ctrl.options" :key="opt" :value="opt">{{ opt }}</option>
+									</select>
 								</div>
 							</div>
-						</div>
+						</template>
 					</div>
 				</div>
 			</div>
@@ -111,7 +128,8 @@ module.exports = {
 			coord_text: null,
 			show_ui: true,
 			open_section: null,
-			sections: SECTIONS
+			sections: SECTIONS,
+			texture_mode: 'Flat'
 		};
 	},
 
@@ -136,6 +154,10 @@ module.exports = {
 
 		'config.mapViewerTerrainColor'(val) {
 			this._terrain_color = hex_to_rgb(val);
+		},
+
+		'config.mapViewerWireframeColor'(val) {
+			this._wireframe_color = hex_to_rgb(val);
 		}
 	},
 
@@ -174,6 +196,27 @@ module.exports = {
 			e.currentTarget.querySelector('input[type="color"]').click();
 		},
 
+		is_ctrl_visible(ctrl) {
+			if (!ctrl.visible_mode)
+				return true;
+
+			return ctrl.visible_mode === this.texture_mode;
+		},
+
+		get_ctrl_value(ctrl) {
+			if (ctrl.data_key)
+				return this[ctrl.data_key];
+
+			return this.config[ctrl.key];
+		},
+
+		set_ctrl_value(ctrl, value) {
+			if (ctrl.data_key)
+				this[ctrl.data_key] = value;
+			else
+				this.config[ctrl.key] = value;
+		},
+
 		_init_gl() {
 			const canvas = this.$refs.canvas;
 			const dpr = window.devicePixelRatio || 1;
@@ -191,6 +234,7 @@ module.exports = {
 			const sky = hex_to_rgb(core.view.config.mapViewerSkyColor);
 			this._gl_ctx.set_clear_color(sky[0], sky[1], sky[2], 1);
 			this._terrain_color = hex_to_rgb(core.view.config.mapViewerTerrainColor);
+			this._wireframe_color = hex_to_rgb(core.view.config.mapViewerWireframeColor);
 
 			this._gl_ctx.set_depth_test(true);
 
@@ -229,7 +273,14 @@ module.exports = {
 				if (this._terrain) {
 					const cam = this._camera.position;
 					this._terrain.update(cam);
-					const visible = this._terrain.render(this._camera.view_matrix, this._camera.projection_matrix, this._terrain_color);
+
+					let visible;
+					if (this.texture_mode === 'Wireframe') {
+						const sky = hex_to_rgb(core.view.config.mapViewerSkyColor);
+						visible = this._terrain.render_wireframe(this._camera.view_matrix, this._camera.projection_matrix, this._wireframe_color, sky, core.view.config.mapViewerWireframeOcclusion);
+					} else {
+						visible = this._terrain.render(this._camera.view_matrix, this._camera.projection_matrix, this._terrain_color);
+					}
 					const loaded = this._terrain.tile_count;
 					const loading = this._terrain.loading_count;
 					this.status_text = loaded + ' ADT (' + loading + ' queued), render (' + visible + '/' + this._terrain.chunk_count + ')';

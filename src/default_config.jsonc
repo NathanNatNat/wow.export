@@ -125,5 +125,7 @@
 	"mapViewerFlySpeed": 200,
 	"mapViewerShowStats": true,
 	"mapViewerSkyColor": "#1f1f1f",
-	"mapViewerTerrainColor": "#878787"
+	"mapViewerTerrainColor": "#878787",
+	"mapViewerWireframeColor": "#57afe2",
+	"mapViewerWireframeOcclusion": true
 }
