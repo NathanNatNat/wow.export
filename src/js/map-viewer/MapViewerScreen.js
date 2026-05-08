@@ -6,6 +6,13 @@ const TerrainRenderer = require('./TerrainRenderer');
 
 const SECTIONS = [
 	{
+		id: 'interface',
+		label: 'Interface',
+		controls: [
+			{ type: 'checkbox', key: 'mapViewerShowStats', label: 'Show Technical Stats' }
+		]
+	},
+	{
 		id: 'rendering',
 		label: 'Rendering',
 		controls: [
@@ -25,7 +32,7 @@ module.exports = {
 	template: `<div class="map-viewer-screen">
 		<canvas ref="canvas" tabindex="0"></canvas>
 		<div class="map-viewer-hud">
-			<span class="map-viewer-status">{{ status_text }}</span>
+			<span v-if="config.mapViewerShowStats" class="map-viewer-status">{{ status_text }}</span>
 			<button class="map-viewer-close" @click="close" title="Close (Esc)">&#x2715;</button>
 		</div>
 		<div class="mv-panel">
@@ -37,7 +44,14 @@ module.exports = {
 				<div v-if="open_section === section.id" class="mv-panel-body">
 					<div v-for="ctrl in section.controls" :key="ctrl.key" class="mv-panel-control">
 						<label class="mv-panel-label">{{ ctrl.label }}</label>
-						<div v-if="ctrl.type === 'slider'" class="mv-panel-slider-row">
+						<div v-if="ctrl.type === 'checkbox'" class="mv-panel-checkbox-row">
+							<input
+								type="checkbox"
+								:checked="config[ctrl.key]"
+								@change="config[ctrl.key] = $event.target.checked"
+							/>
+						</div>
+						<div v-else-if="ctrl.type === 'slider'" class="mv-panel-slider-row">
 							<input
 								type="range"
 								class="mv-panel-slider"

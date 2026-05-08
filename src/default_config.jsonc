@@ -122,5 +122,6 @@
 	"allowCacheCollection": true,
 	"machineId": null,
 	"mapViewerRenderDistance": 8,
-	"mapViewerFlySpeed": 200
+	"mapViewerFlySpeed": 200,
+	"mapViewerShowStats": true
 }
