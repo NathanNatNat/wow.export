@@ -70,7 +70,9 @@ class TerrainRenderer {
 		this.vao = null;
 		this.tile_count = 0;
 		this._pending_tiles = [];
-		this._tile_ranges = [];
+		this._chunk_bounds = null;
+		this._chunk_draw = null;
+		this._chunk_count = 0;
 		this._frustum_planes = new Float32Array(24);
 		this._vp_matrix = new Float32Array(16);
 		this.bounds = {
@@ -150,39 +152,55 @@ class TerrainRenderer {
 
 		let total_floats = 0;
 		let total_indices = 0;
+		let total_chunks = 0;
 
 		for (const geo of pending) {
 			total_floats += geo.vertex_data.length;
 			total_indices += geo.index_count;
+			total_chunks += geo.chunks.length;
 		}
 
 		const vertex_data = new Float32Array(total_floats);
 		const index_data = new Uint32Array(total_indices);
 
+		const chunk_bounds = new Float32Array(total_chunks * 6);
+		const chunk_draw = new Uint32Array(total_chunks * 2);
+
 		let vert_write = 0;
 		let idx_write = 0;
 		let base_vertex = 0;
-
-		this._tile_ranges = [];
+		let chunk_idx = 0;
 
 		for (const geo of pending) {
 			vertex_data.set(geo.vertex_data, vert_write);
 			vert_write += geo.vertex_data.length;
 
-			const range_start = idx_write;
+			const idx_base = idx_write;
 			for (let i = 0; i < geo.index_count; i++)
 				index_data[idx_write++] = geo.index_data[i] + base_vertex;
 
-			this._tile_ranges.push({
-				index_offset: range_start,
-				index_count: geo.index_count,
-				bounds_min: geo.bounds_min,
-				bounds_max: geo.bounds_max
-			});
+			for (const chunk of geo.chunks) {
+				const bo = chunk_idx * 6;
+				chunk_bounds[bo] = chunk.bounds_min[0];
+				chunk_bounds[bo + 1] = chunk.bounds_min[1];
+				chunk_bounds[bo + 2] = chunk.bounds_min[2];
+				chunk_bounds[bo + 3] = chunk.bounds_max[0];
+				chunk_bounds[bo + 4] = chunk.bounds_max[1];
+				chunk_bounds[bo + 5] = chunk.bounds_max[2];
+
+				const dw = chunk_idx * 2;
+				chunk_draw[dw] = idx_base + chunk.index_offset;
+				chunk_draw[dw + 1] = chunk.index_count;
+
+				chunk_idx++;
+			}
 
 			base_vertex += geo.vertex_data.length / 6;
 		}
 
+		this._chunk_bounds = chunk_bounds;
+		this._chunk_draw = chunk_draw;
+		this._chunk_count = total_chunks;
 		this._pending_tiles.length = 0;
 
 		const vao = new VertexArray(this.ctx);
@@ -199,7 +217,6 @@ class TerrainRenderer {
 	}
 
 	_build_tile_geometry(adt) {
-		// pre-calculate sizes
 		let chunk_count = 0;
 		for (let i = 0; i < 256; i++) {
 			if (adt.chunks[i]?.vertices)
@@ -210,8 +227,7 @@ class TerrainRenderer {
 		const vertex_data = new Float32Array(vert_count * 6);
 		const index_data = new Uint16Array(chunk_count * 768);
 
-		const tile_min = [Infinity, Infinity, Infinity];
-		const tile_max = [-Infinity, -Infinity, -Infinity];
+		const chunks = [];
 
 		let vert_offset = 0;
 		let chunk_vert_base = 0;
@@ -222,6 +238,9 @@ class TerrainRenderer {
 				const chunk = adt.chunks[(x * 16) + y];
 				if (!chunk?.vertices)
 					continue;
+
+				const chunk_min = [Infinity, Infinity, Infinity];
+				const chunk_max = [-Infinity, -Infinity, -Infinity];
 
 				const cx = chunk.position[0];
 				const cy = chunk.position[1];
@@ -262,18 +281,20 @@ class TerrainRenderer {
 						if (vy > b.max[1]) b.max[1] = vy;
 						if (vz > b.max[2]) b.max[2] = vz;
 
-						// update tile bounds
-						if (vx < tile_min[0]) tile_min[0] = vx;
-						if (vy < tile_min[1]) tile_min[1] = vy;
-						if (vz < tile_min[2]) tile_min[2] = vz;
-						if (vx > tile_max[0]) tile_max[0] = vx;
-						if (vy > tile_max[1]) tile_max[1] = vy;
-						if (vz > tile_max[2]) tile_max[2] = vz;
+						// update chunk bounds
+						if (vx < chunk_min[0]) chunk_min[0] = vx;
+						if (vy < chunk_min[1]) chunk_min[1] = vy;
+						if (vz < chunk_min[2]) chunk_min[2] = vz;
+						if (vx > chunk_max[0]) chunk_max[0] = vx;
+						if (vy > chunk_max[1]) chunk_max[1] = vy;
+						if (vz > chunk_max[2]) chunk_max[2] = vz;
 
 						vert_offset++;
 						idx++;
 					}
 				}
+
+				const chunk_idx_start = idx_offset;
 
 				// generate triangle indices for inner vertices
 				for (let j = 9; j < 145; j++) {
@@ -296,6 +317,13 @@ class TerrainRenderer {
 						j += 9;
 				}
 
+				chunks.push({
+					index_offset: chunk_idx_start,
+					index_count: idx_offset - chunk_idx_start,
+					bounds_min: chunk_min,
+					bounds_max: chunk_max
+				});
+
 				chunk_vert_base += 145;
 			}
 		}
@@ -304,8 +332,7 @@ class TerrainRenderer {
 			vertex_data,
 			index_data,
 			index_count: idx_offset,
-			bounds_min: tile_min,
-			bounds_max: tile_max
+			chunks
 		};
 	}
 
@@ -329,12 +356,43 @@ class TerrainRenderer {
 		this._compute_frustum(view_matrix, projection_matrix);
 
 		const gl = this.gl;
+		const bounds = this._chunk_bounds;
+		const draw = this._chunk_draw;
+		const count = this._chunk_count;
+		const planes = this._frustum_planes;
+
 		this.vao.bind();
 
-		for (const range of this._tile_ranges) {
-			if (this._is_aabb_visible(range.bounds_min, range.bounds_max))
-				this.vao.draw(gl.TRIANGLES, range.index_count, range.index_offset);
+		// coalesce consecutive visible chunks into single draw calls
+		let batch_start = -1;
+		let batch_count = 0;
+
+		for (let i = 0; i < count; i++) {
+			const bo = i * 6;
+			const dw = i * 2;
+
+			if (this._is_aabb_visible(bounds, bo, planes)) {
+				const offset = draw[dw];
+				const idx_count = draw[dw + 1];
+
+				if (batch_start === -1) {
+					batch_start = offset;
+					batch_count = idx_count;
+				} else if (offset === batch_start + batch_count) {
+					batch_count += idx_count;
+				} else {
+					this.vao.draw(gl.TRIANGLES, batch_count, batch_start);
+					batch_start = offset;
+					batch_count = idx_count;
+				}
+			} else if (batch_start !== -1) {
+				this.vao.draw(gl.TRIANGLES, batch_count, batch_start);
+				batch_start = -1;
+			}
 		}
+
+		if (batch_start !== -1)
+			this.vao.draw(gl.TRIANGLES, batch_count, batch_start);
 	}
 
 	_compute_frustum(view, proj) {
@@ -379,17 +437,15 @@ class TerrainRenderer {
 		}
 	}
 
-	_is_aabb_visible(bmin, bmax) {
-		const p = this._frustum_planes;
-
+	_is_aabb_visible(bounds, bo, planes) {
 		for (let i = 0; i < 6; i++) {
 			const o = i * 4;
-			const a = p[o], b = p[o + 1], c = p[o + 2], d = p[o + 3];
+			const a = planes[o], b = planes[o + 1], c = planes[o + 2], d = planes[o + 3];
 
 			// p-vertex: corner most aligned with the plane normal
-			const px = a >= 0 ? bmax[0] : bmin[0];
-			const py = b >= 0 ? bmax[1] : bmin[1];
-			const pz = c >= 0 ? bmax[2] : bmin[2];
+			const px = a >= 0 ? bounds[bo + 3] : bounds[bo];
+			const py = b >= 0 ? bounds[bo + 4] : bounds[bo + 1];
+			const pz = c >= 0 ? bounds[bo + 5] : bounds[bo + 2];
 
 			if (a * px + b * py + c * pz + d < 0)
 				return false;
