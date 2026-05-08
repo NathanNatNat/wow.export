@@ -99,7 +99,7 @@ class TerrainRenderer {
 	}
 
 	get loading_count() {
-		return this._loading.size;
+		return this._load_queue.length + this._loading.size + this._upload_queue.length;
 	}
 
 	get chunk_count() {
