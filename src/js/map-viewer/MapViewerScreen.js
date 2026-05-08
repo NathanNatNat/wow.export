@@ -1,8 +1,11 @@
 const core = require('../core');
+const constants = require('../constants');
 const GLContext = require('../3D/gl/GLContext');
 const PerspectiveCamera = require('./PerspectiveCamera');
 const FreeCameraControls = require('./FreeCameraControls');
 const TerrainRenderer = require('./TerrainRenderer');
+
+const TILE_SIZE = constants.GAME.TILE_SIZE;
 
 const SECTIONS = [
 	{
@@ -42,7 +45,11 @@ module.exports = {
 		<canvas ref="canvas"></canvas>
 		<template v-if="show_ui">
 			<div class="map-viewer-hud">
-				<span v-if="config.mapViewerShowStats" class="map-viewer-status">{{ status_text }}</span>
+				<div v-if="config.mapViewerShowStats" class="map-viewer-hud-stats">
+					<span v-if="map_info" class="map-viewer-status">{{ map_info }}</span>
+					<span class="map-viewer-status">{{ status_text }}</span>
+					<span v-if="coord_text" class="map-viewer-status">{{ coord_text }}</span>
+				</div>
 				<button class="map-viewer-close" @click="close" title="Close (Esc)">&#x2715;</button>
 			</div>
 			<div class="mv-panel">
@@ -100,6 +107,8 @@ module.exports = {
 	data() {
 		return {
 			status_text: 'Initializing...',
+			map_info: null,
+			coord_text: null,
 			show_ui: true,
 			open_section: null,
 			sections: SECTIONS
@@ -218,11 +227,16 @@ module.exports = {
 				this._gl_ctx.clear(true, true);
 
 				if (this._terrain) {
-					this._terrain.update(this._camera.position);
+					const cam = this._camera.position;
+					this._terrain.update(cam);
 					const visible = this._terrain.render(this._camera.view_matrix, this._camera.projection_matrix, this._terrain_color);
 					const loaded = this._terrain.tile_count;
 					const loading = this._terrain.loading_count;
 					this.status_text = loaded + ' ADT (' + loading + ' queued), render (' + visible + '/' + this._terrain.chunk_count + ')';
+
+					const adt_x = Math.floor(32 - cam[2] / TILE_SIZE);
+					const adt_y = Math.floor(32 - cam[0] / TILE_SIZE);
+					this.coord_text = 'X: ' + cam[0].toFixed(1) + ' Y: ' + cam[2].toFixed(1) + ' Z: ' + cam[1].toFixed(1) + ' [' + adt_x + ', ' + adt_y + ']';
 				}
 
 				requestAnimationFrame(frame);
@@ -241,6 +255,14 @@ module.exports = {
 				this.status_text = 'No map selected';
 				return;
 			}
+
+			const map_name = core.view.mapViewerMapName;
+			const map_id = core.view.mapViewerMapId;
+
+			if (map_name && map_id != null)
+				this.map_info = map_name + ' (' + map_dir + ') [' + map_id + ']';
+			else
+				this.map_info = map_dir;
 
 			const terrain = new TerrainRenderer(this._gl_ctx);
 

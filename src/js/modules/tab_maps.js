@@ -23,6 +23,7 @@ const MAP_OFFSET = constants.GAME.MAP_OFFSET;
 
 let selected_map_id = null;
 let selected_map_dir = null;
+let selected_map_name = null;
 let selected_wdt = null;
 let game_objects_db2 = null;
 let wmo_minimap_textures = null;
@@ -367,6 +368,8 @@ module.exports = {
 	methods: {
 		view_map() {
 			this.$core.view.mapViewerMapDir = selected_map_dir;
+			this.$core.view.mapViewerMapName = selected_map_name;
+			this.$core.view.mapViewerMapId = selected_map_id;
 			this.$core.view.mapViewerActive = true;
 		},
 
@@ -418,13 +421,14 @@ module.exports = {
 			nw.Shell.openItem(dir);
 		},
 
-		async load_map(mapID, mapDir) {
+		async load_map(mapID, mapDir, mapName) {
 			const map_dir_lower = mapDir.toLowerCase();
 
 			this.$core.hideToast();
 
 			selected_map_id = mapID;
 			selected_map_dir = map_dir_lower;
+			selected_map_name = mapName ?? null;
 
 			selected_wdt = null;
 			current_wmo_minimap = null;
@@ -1144,7 +1148,7 @@ module.exports = {
 			if (!this.$core.view.isBusy && first) {
 				const map = parse_map_entry(first);
 				if (selected_map_id !== map.id)
-					this.load_map(map.id, map.dir);
+					this.load_map(map.id, map.dir, map.name);
 			}
 		});
 

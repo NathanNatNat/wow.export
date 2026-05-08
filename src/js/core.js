@@ -227,6 +227,8 @@ const makeNewView = () => {
 		mapViewerSelection: [], // Map viewer tile selection
 		mapViewerActive: false,
 		mapViewerMapDir: null,
+		mapViewerMapName: null,
+		mapViewerMapId: null,
 		selectedExpansionFilter: -1, // Currently selected expansion filter (-1 = show all)
 		chrModelViewerContext: null, // 3D context for the character-specific model viewer.
 		chrModelViewerAnims: [], // Available character animations.
