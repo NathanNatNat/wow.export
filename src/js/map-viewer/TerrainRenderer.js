@@ -11,7 +11,9 @@ const CHUNK_SIZE = TILE_SIZE / 16;
 const UNIT_SIZE = CHUNK_SIZE / 8;
 const UNIT_SIZE_HALF = UNIT_SIZE / 2;
 
-const BATCH_SIZE = 8;
+const MAX_CONCURRENT_LOADS = 4;
+const UNLOAD_PADDING = 2;
+const DEFAULT_RENDER_DISTANCE = 8;
 
 const VERT_SHADER = `#version 300 es
 precision highp float;
@@ -67,33 +69,49 @@ class TerrainRenderer {
 		this.ctx = gl_context;
 		this.gl = gl_context.gl;
 		this.shader = new ShaderProgram(gl_context, VERT_SHADER, FRAG_SHADER);
-		this.vao = null;
-		this.tile_count = 0;
-		this._pending_tiles = [];
-		this._chunk_bounds = null;
-		this._chunk_draw = null;
+		this.render_distance = DEFAULT_RENDER_DISTANCE;
+		this.map_center = [0, 0, 0];
+
+		this._tiles = new Map();
+		this._tile_info = new Map();
+		this._loading = new Set();
+		this._load_queue = [];
+		this._casc = null;
 		this._chunk_count = 0;
+		this._disposed = false;
+
+		this._last_tx = NaN;
+		this._last_ty = NaN;
+
 		this._frustum_planes = new Float32Array(24);
 		this._vp_matrix = new Float32Array(16);
-		this.bounds = {
-			min: [Infinity, Infinity, Infinity],
-			max: [-Infinity, -Infinity, -Infinity]
-		};
 	}
 
-	async load_map(map_dir, on_progress) {
-		const casc = core.view.casc;
+	get tile_count() {
+		return this._tiles.size;
+	}
+
+	get loading_count() {
+		return this._loading.size;
+	}
+
+	get chunk_count() {
+		return this._chunk_count;
+	}
+
+	async init(map_dir) {
+		this._casc = core.view.casc;
 		const prefix = 'world/maps/' + map_dir + '/' + map_dir;
 
-		const wdt_file = await casc.getFileByName(prefix + '.wdt');
+		const wdt_file = await this._casc.getFileByName(prefix + '.wdt');
 		const wdt = new WDTLoader(wdt_file);
 		wdt.load();
 
 		if (!wdt.entries)
 			throw new Error('WDT has no tile entries');
 
-		// collect valid tiles
-		const tile_infos = [];
+		let min_tx = MAP_SIZE, min_ty = MAP_SIZE, max_tx = 0, max_ty = 0;
+
 		for (let x = 0; x < MAP_SIZE; x++) {
 			for (let y = 0; y < MAP_SIZE; y++) {
 				const idx = (y * MAP_SIZE) + x;
@@ -104,134 +122,148 @@ class TerrainRenderer {
 				if (!entry || !entry.rootADT)
 					continue;
 
-				tile_infos.push({ root_id: entry.rootADT, x, y, index: idx });
+				const key = x + '_' + y;
+				this._tile_info.set(key, { root_id: entry.rootADT, x, y });
+
+				if (x < min_tx) min_tx = x;
+				if (y < min_ty) min_ty = y;
+				if (x > max_tx) max_tx = x;
+				if (y > max_ty) max_ty = y;
 			}
 		}
 
-		const total = tile_infos.length;
-		let loaded = 0;
+		const center_tx = (min_tx + max_tx) / 2;
+		const center_ty = (min_ty + max_ty) / 2;
 
-		if (on_progress)
-			on_progress(0, total);
-
-		// load tiles in batches to avoid overwhelming CASC
-		for (let i = 0; i < tile_infos.length; i += BATCH_SIZE) {
-			const batch = tile_infos.slice(i, i + BATCH_SIZE);
-			await Promise.all(batch.map(info =>
-				this._load_tile(casc, info.root_id)
-					.catch(() => {})
-					.then(() => {
-						loaded++;
-						if (on_progress)
-							on_progress(loaded, total);
-					})
-			));
-		}
-
-		this._build_merged_vao();
+		this.map_center = [
+			(32 - center_ty) * TILE_SIZE,
+			0,
+			(32 - center_tx) * TILE_SIZE
+		];
 	}
 
-	async _load_tile(casc, root_file_id) {
-		const root_file = await casc.getFile(root_file_id);
-		const adt = new ADTLoader(root_file);
-		adt.loadRoot();
+	update(camera_pos) {
+		const tx = Math.floor(32 - camera_pos[2] / TILE_SIZE);
+		const ty = Math.floor(32 - camera_pos[0] / TILE_SIZE);
 
-		const geo = this._build_tile_geometry(adt);
-		if (geo.index_count === 0)
-			return;
-
-		this._pending_tiles.push(geo);
-	}
-
-	_build_merged_vao() {
-		const pending = this._pending_tiles;
-		this.tile_count = pending.length;
-
-		if (pending.length === 0)
-			return;
-
-		let total_floats = 0;
-		let total_indices = 0;
-		let total_chunks = 0;
-
-		for (const geo of pending) {
-			total_floats += geo.vertex_data.length;
-			total_indices += geo.index_count;
-			total_chunks += geo.chunks.length;
+		if (tx !== this._last_tx || ty !== this._last_ty) {
+			this._last_tx = tx;
+			this._last_ty = ty;
+			this._update_needed_tiles(tx, ty);
 		}
 
-		const vertex_data = new Float32Array(total_floats);
-		const index_data = new Uint32Array(total_indices);
+		this._pump_load_queue();
+	}
 
-		const chunk_bounds = new Float32Array(total_chunks * 6);
-		const chunk_draw = new Uint32Array(total_chunks * 2);
+	_update_needed_tiles(center_tx, center_ty) {
+		const rd = this.render_distance;
+		const ud = rd + UNLOAD_PADDING;
 
-		let vert_write = 0;
-		let idx_write = 0;
-		let base_vertex = 0;
-		let chunk_idx = 0;
-
-		for (const geo of pending) {
-			vertex_data.set(geo.vertex_data, vert_write);
-			vert_write += geo.vertex_data.length;
-
-			const idx_base = idx_write;
-			for (let i = 0; i < geo.index_count; i++)
-				index_data[idx_write++] = geo.index_data[i] + base_vertex;
-
-			for (const chunk of geo.chunks) {
-				const bo = chunk_idx * 6;
-				chunk_bounds[bo] = chunk.bounds_min[0];
-				chunk_bounds[bo + 1] = chunk.bounds_min[1];
-				chunk_bounds[bo + 2] = chunk.bounds_min[2];
-				chunk_bounds[bo + 3] = chunk.bounds_max[0];
-				chunk_bounds[bo + 4] = chunk.bounds_max[1];
-				chunk_bounds[bo + 5] = chunk.bounds_max[2];
-
-				const dw = chunk_idx * 2;
-				chunk_draw[dw] = idx_base + chunk.index_offset;
-				chunk_draw[dw + 1] = chunk.index_count;
-
-				chunk_idx++;
+		// unload tiles beyond unload distance
+		for (const [key, tile] of this._tiles) {
+			if (Math.abs(tile.x - center_tx) > ud || Math.abs(tile.y - center_ty) > ud) {
+				tile.vao.dispose();
+				this._chunk_count -= tile.chunk_count;
+				this._tiles.delete(key);
 			}
-
-			base_vertex += geo.vertex_data.length / 6;
 		}
 
-		this._chunk_bounds = chunk_bounds;
-		this._chunk_draw = chunk_draw;
-		this._chunk_count = total_chunks;
-		this._pending_tiles.length = 0;
+		// cancel in-flight loads beyond unload distance
+		for (const key of this._loading) {
+			const info = this._tile_info.get(key);
+			if (Math.abs(info.x - center_tx) > ud || Math.abs(info.y - center_ty) > ud)
+				this._loading.delete(key);
+		}
 
-		const vao = new VertexArray(this.ctx);
-		vao.bind();
-		vao.set_vertex_buffer(vertex_data);
+		// build priority-sorted load queue (closest first)
+		const to_load = [];
+		for (let dx = -rd; dx <= rd; dx++) {
+			for (let dy = -rd; dy <= rd; dy++) {
+				const tx = center_tx + dx;
+				const ty = center_ty + dy;
+				const key = tx + '_' + ty;
 
-		const gl = this.gl;
-		const stride = 24;
-		vao.set_attribute(0, 3, gl.FLOAT, false, stride, 0);
-		vao.set_attribute(1, 3, gl.FLOAT, false, stride, 12);
-		vao.set_index_buffer(index_data);
+				if (!this._tile_info.has(key))
+					continue;
 
-		this.vao = vao;
+				if (this._tiles.has(key) || this._loading.has(key))
+					continue;
+
+				to_load.push({ key, dist: dx * dx + dy * dy });
+			}
+		}
+
+		to_load.sort((a, b) => a.dist - b.dist);
+		this._load_queue = to_load.map(e => e.key);
 	}
 
-	_build_tile_geometry(adt) {
-		let chunk_count = 0;
+	_pump_load_queue() {
+		if (this._disposed)
+			return;
+
+		while (this._loading.size < MAX_CONCURRENT_LOADS && this._load_queue.length > 0) {
+			const key = this._load_queue.shift();
+			if (this._tiles.has(key) || this._loading.has(key))
+				continue;
+
+			this._start_tile_load(key);
+		}
+	}
+
+	async _start_tile_load(key) {
+		this._loading.add(key);
+		const info = this._tile_info.get(key);
+
+		try {
+			const root_file = await this._casc.getFile(info.root_id);
+
+			if (!this._loading.has(key))
+				return this._pump_load_queue();
+
+			const adt = new ADTLoader(root_file);
+			adt.loadRoot();
+
+			if (!this._loading.has(key))
+				return this._pump_load_queue();
+
+			this._loading.delete(key);
+
+			const tile = this._build_tile(adt, info.x, info.y);
+			if (tile) {
+				this._tiles.set(key, tile);
+				this._chunk_count += tile.chunk_count;
+			}
+		} catch (e) {
+			this._loading.delete(key);
+		}
+
+		this._pump_load_queue();
+	}
+
+	_build_tile(adt, tx, ty) {
+		let valid_chunks = 0;
 		for (let i = 0; i < 256; i++) {
 			if (adt.chunks[i]?.vertices)
-				chunk_count++;
+				valid_chunks++;
 		}
 
-		const vert_count = chunk_count * 145;
-		const vertex_data = new Float32Array(vert_count * 6);
-		const index_data = new Uint16Array(chunk_count * 768);
+		if (valid_chunks === 0)
+			return null;
 
-		const chunks = [];
+		const vert_count = valid_chunks * 145;
+		const vertex_data = new Float32Array(vert_count * 6);
+		const index_data = new Uint16Array(valid_chunks * 768);
+
+		const chunk_bounds = new Float32Array(valid_chunks * 6);
+		const chunk_draw = new Uint32Array(valid_chunks * 2);
+
+		const tile_min = [Infinity, Infinity, Infinity];
+		const tile_max = [-Infinity, -Infinity, -Infinity];
 
 		let vert_offset = 0;
 		let chunk_vert_base = 0;
 		let idx_offset = 0;
+		let chunk_idx = 0;
 
 		for (let x = 0; x < 16; x++) {
 			for (let y = 0; y < 16; y++) {
@@ -272,16 +304,13 @@ class TerrainRenderer {
 							vertex_data[di + 4] = 1;
 						}
 
-						// update global bounds
-						const b = this.bounds;
-						if (vx < b.min[0]) b.min[0] = vx;
-						if (vy < b.min[1]) b.min[1] = vy;
-						if (vz < b.min[2]) b.min[2] = vz;
-						if (vx > b.max[0]) b.max[0] = vx;
-						if (vy > b.max[1]) b.max[1] = vy;
-						if (vz > b.max[2]) b.max[2] = vz;
+						if (vx < tile_min[0]) tile_min[0] = vx;
+						if (vy < tile_min[1]) tile_min[1] = vy;
+						if (vz < tile_min[2]) tile_min[2] = vz;
+						if (vx > tile_max[0]) tile_max[0] = vx;
+						if (vy > tile_max[1]) tile_max[1] = vy;
+						if (vz > tile_max[2]) tile_max[2] = vz;
 
-						// update chunk bounds
 						if (vx < chunk_min[0]) chunk_min[0] = vx;
 						if (vy < chunk_min[1]) chunk_min[1] = vy;
 						if (vz < chunk_min[2]) chunk_min[2] = vz;
@@ -296,7 +325,6 @@ class TerrainRenderer {
 
 				const chunk_idx_start = idx_offset;
 
-				// generate triangle indices for inner vertices
 				for (let j = 9; j < 145; j++) {
 					const ind = chunk_vert_base + j;
 					index_data[idx_offset++] = ind;
@@ -312,41 +340,51 @@ class TerrainRenderer {
 					index_data[idx_offset++] = ind + 8;
 					index_data[idx_offset++] = ind + 9;
 
-					// skip outer row vertices between inner rows
 					if (!((j + 1) % 17))
 						j += 9;
 				}
 
-				chunks.push({
-					index_offset: chunk_idx_start,
-					index_count: idx_offset - chunk_idx_start,
-					bounds_min: chunk_min,
-					bounds_max: chunk_max
-				});
+				const bo = chunk_idx * 6;
+				chunk_bounds[bo] = chunk_min[0];
+				chunk_bounds[bo + 1] = chunk_min[1];
+				chunk_bounds[bo + 2] = chunk_min[2];
+				chunk_bounds[bo + 3] = chunk_max[0];
+				chunk_bounds[bo + 4] = chunk_max[1];
+				chunk_bounds[bo + 5] = chunk_max[2];
 
+				const dw = chunk_idx * 2;
+				chunk_draw[dw] = chunk_idx_start;
+				chunk_draw[dw + 1] = idx_offset - chunk_idx_start;
+
+				chunk_idx++;
 				chunk_vert_base += 145;
 			}
 		}
 
+		const vao = new VertexArray(this.ctx);
+		vao.bind();
+		vao.set_vertex_buffer(vertex_data);
+
+		const gl = this.gl;
+		const stride = 24;
+		vao.set_attribute(0, 3, gl.FLOAT, false, stride, 0);
+		vao.set_attribute(1, 3, gl.FLOAT, false, stride, 12);
+		vao.set_index_buffer(index_data);
+
 		return {
-			vertex_data,
-			index_data,
-			index_count: idx_offset,
-			chunks
+			vao,
+			chunk_bounds,
+			chunk_draw,
+			chunk_count: chunk_idx,
+			x: tx,
+			y: ty,
+			bounds_min: tile_min,
+			bounds_max: tile_max
 		};
 	}
 
-	get_center() {
-		const b = this.bounds;
-		return [
-			(b.min[0] + b.max[0]) / 2,
-			(b.min[1] + b.max[1]) / 2,
-			(b.min[2] + b.max[2]) / 2
-		];
-	}
-
 	render(view_matrix, projection_matrix) {
-		if (!this.shader.is_valid() || !this.vao)
+		if (!this.shader.is_valid() || this._tiles.size === 0)
 			return 0;
 
 		this.shader.use();
@@ -356,51 +394,71 @@ class TerrainRenderer {
 		this._compute_frustum(view_matrix, projection_matrix);
 
 		const gl = this.gl;
-		const bounds = this._chunk_bounds;
-		const draw = this._chunk_draw;
-		const count = this._chunk_count;
 		const planes = this._frustum_planes;
-
-		this.vao.bind();
-
-		// coalesce consecutive visible chunks into single draw calls
-		let batch_start = -1;
-		let batch_count = 0;
 		let visible = 0;
 
-		for (let i = 0; i < count; i++) {
-			const bo = i * 6;
-			const dw = i * 2;
+		for (const tile of this._tiles.values()) {
+			if (!this._is_tile_visible(tile, planes))
+				continue;
 
-			if (this._is_aabb_visible(bounds, bo, planes)) {
-				visible++;
-				const offset = draw[dw];
-				const idx_count = draw[dw + 1];
+			tile.vao.bind();
 
-				if (batch_start === -1) {
-					batch_start = offset;
-					batch_count = idx_count;
-				} else if (offset === batch_start + batch_count) {
-					batch_count += idx_count;
-				} else {
-					this.vao.draw(gl.TRIANGLES, batch_count, batch_start);
-					batch_start = offset;
-					batch_count = idx_count;
+			const bounds = tile.chunk_bounds;
+			const draw = tile.chunk_draw;
+			let batch_start = -1;
+			let batch_count = 0;
+
+			for (let i = 0; i < tile.chunk_count; i++) {
+				const bo = i * 6;
+				const dw = i * 2;
+
+				if (this._is_aabb_visible(bounds, bo, planes)) {
+					visible++;
+					const offset = draw[dw];
+					const idx_count = draw[dw + 1];
+
+					if (batch_start === -1) {
+						batch_start = offset;
+						batch_count = idx_count;
+					} else if (offset === batch_start + batch_count) {
+						batch_count += idx_count;
+					} else {
+						tile.vao.draw(gl.TRIANGLES, batch_count, batch_start);
+						batch_start = offset;
+						batch_count = idx_count;
+					}
+				} else if (batch_start !== -1) {
+					tile.vao.draw(gl.TRIANGLES, batch_count, batch_start);
+					batch_start = -1;
 				}
-			} else if (batch_start !== -1) {
-				this.vao.draw(gl.TRIANGLES, batch_count, batch_start);
-				batch_start = -1;
 			}
-		}
 
-		if (batch_start !== -1)
-			this.vao.draw(gl.TRIANGLES, batch_count, batch_start);
+			if (batch_start !== -1)
+				tile.vao.draw(gl.TRIANGLES, batch_count, batch_start);
+		}
 
 		return visible;
 	}
 
+	_is_tile_visible(tile, planes) {
+		const min = tile.bounds_min;
+		const max = tile.bounds_max;
+
+		for (let i = 0; i < 6; i++) {
+			const o = i * 4;
+			const a = planes[o], b = planes[o + 1], c = planes[o + 2], d = planes[o + 3];
+			const px = a >= 0 ? max[0] : min[0];
+			const py = b >= 0 ? max[1] : min[1];
+			const pz = c >= 0 ? max[2] : min[2];
+
+			if (a * px + b * py + c * pz + d < 0)
+				return false;
+		}
+
+		return true;
+	}
+
 	_compute_frustum(view, proj) {
-		// multiply projection * view (column-major)
 		const vp = this._vp_matrix;
 		for (let i = 0; i < 4; i++) {
 			for (let j = 0; j < 4; j++) {
@@ -412,23 +470,15 @@ class TerrainRenderer {
 			}
 		}
 
-		// extract 6 frustum planes (Gribb-Hartmann)
 		const p = this._frustum_planes;
 
-		// left: row3 + row0
 		p[0] = vp[3] + vp[0]; p[1] = vp[7] + vp[4]; p[2] = vp[11] + vp[8]; p[3] = vp[15] + vp[12];
-		// right: row3 - row0
 		p[4] = vp[3] - vp[0]; p[5] = vp[7] - vp[4]; p[6] = vp[11] - vp[8]; p[7] = vp[15] - vp[12];
-		// bottom: row3 + row1
 		p[8] = vp[3] + vp[1]; p[9] = vp[7] + vp[5]; p[10] = vp[11] + vp[9]; p[11] = vp[15] + vp[13];
-		// top: row3 - row1
 		p[12] = vp[3] - vp[1]; p[13] = vp[7] - vp[5]; p[14] = vp[11] - vp[9]; p[15] = vp[15] - vp[13];
-		// near: row3 + row2
 		p[16] = vp[3] + vp[2]; p[17] = vp[7] + vp[6]; p[18] = vp[11] + vp[10]; p[19] = vp[15] + vp[14];
-		// far: row3 - row2
 		p[20] = vp[3] - vp[2]; p[21] = vp[7] - vp[6]; p[22] = vp[11] - vp[10]; p[23] = vp[15] - vp[14];
 
-		// normalize each plane
 		for (let i = 0; i < 6; i++) {
 			const o = i * 4;
 			const len = Math.sqrt(p[o] * p[o] + p[o + 1] * p[o + 1] + p[o + 2] * p[o + 2]);
@@ -446,7 +496,6 @@ class TerrainRenderer {
 			const o = i * 4;
 			const a = planes[o], b = planes[o + 1], c = planes[o + 2], d = planes[o + 3];
 
-			// p-vertex: corner most aligned with the plane normal
 			const px = a >= 0 ? bounds[bo + 3] : bounds[bo];
 			const py = b >= 0 ? bounds[bo + 4] : bounds[bo + 1];
 			const pz = c >= 0 ? bounds[bo + 5] : bounds[bo + 2];
@@ -459,10 +508,14 @@ class TerrainRenderer {
 	}
 
 	dispose() {
-		if (this.vao) {
-			this.vao.dispose();
-			this.vao = null;
-		}
+		this._disposed = true;
+		this._loading.clear();
+		this._load_queue.length = 0;
+
+		for (const tile of this._tiles.values())
+			tile.vao.dispose();
+
+		this._tiles.clear();
 
 		if (this.shader) {
 			this.shader.dispose();

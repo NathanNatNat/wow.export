@@ -30,9 +30,7 @@ module.exports = {
 		};
 		document.addEventListener('keydown', this._esc_handler);
 
-		await this._load_terrain();
-
-		// focus canvas after load so keyboard controls work immediately
+		await this._init_terrain();
 		this.$refs.canvas?.focus();
 	},
 
@@ -96,8 +94,11 @@ module.exports = {
 				this._gl_ctx.clear(true, true);
 
 				if (this._terrain) {
+					this._terrain.update(this._camera.position);
 					const visible = this._terrain.render(this._camera.view_matrix, this._camera.projection_matrix);
-					this.status_text = this._terrain.tile_count + ' ADT, render (' + visible + '/' + this._terrain._chunk_count + ')';
+					const loaded = this._terrain.tile_count;
+					const loading = this._terrain.loading_count;
+					this.status_text = loaded + ' ADT (' + loading + ' queued), render (' + visible + '/' + this._terrain.chunk_count + ')';
 				}
 
 				requestAnimationFrame(frame);
@@ -110,37 +111,31 @@ module.exports = {
 			this._rendering = false;
 		},
 
-		async _load_terrain() {
+		async _init_terrain() {
 			const map_dir = core.view.mapViewerMapDir;
 			if (!map_dir) {
 				this.status_text = 'No map selected';
 				return;
 			}
 
-			this._terrain = new TerrainRenderer(this._gl_ctx);
+			const terrain = new TerrainRenderer(this._gl_ctx);
 
 			try {
 				this.status_text = 'Loading WDT...';
-
-				await this._terrain.load_map(map_dir, (loaded, total) => {
-					this.status_text = 'Loading tiles: ' + loaded + '/' + total;
-				});
-
+				await terrain.init(map_dir);
+				this._terrain = terrain;
 				this._position_camera();
 			} catch (e) {
 				this.status_text = 'Error: ' + e.message;
+				terrain.dispose();
 			}
 		},
 
 		_position_camera() {
-			const center = this._terrain.get_center();
-			const b = this._terrain.bounds;
-			const extent_y = b.max[1] - b.min[1];
-
+			const center = this._terrain.map_center;
 			this._camera.position[0] = center[0];
-			this._camera.position[1] = center[1] + Math.max(extent_y * 2, 500);
+			this._camera.position[1] = 500;
 			this._camera.position[2] = center[2];
-
 			this._controls.pitch = -0.6;
 			this._controls.yaw = 0;
 		},
