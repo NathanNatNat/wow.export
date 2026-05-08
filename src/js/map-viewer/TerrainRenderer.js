@@ -76,6 +76,7 @@ class TerrainRenderer {
 		this._tile_info = new Map();
 		this._loading = new Set();
 		this._load_queue = [];
+		this._upload_queue = [];
 		this._casc = null;
 		this._chunk_count = 0;
 		this._disposed = false;
@@ -143,6 +144,8 @@ class TerrainRenderer {
 	}
 
 	update(camera_pos) {
+		this._process_uploads();
+
 		const tx = Math.floor(32 - camera_pos[2] / TILE_SIZE);
 		const ty = Math.floor(32 - camera_pos[0] / TILE_SIZE);
 
@@ -226,13 +229,11 @@ class TerrainRenderer {
 			if (!this._loading.has(key))
 				return this._pump_load_queue();
 
-			this._loading.delete(key);
-
-			const tile = this._build_tile(adt, info.x, info.y);
-			if (tile) {
-				this._tiles.set(key, tile);
-				this._chunk_count += tile.chunk_count;
-			}
+			const geo = this._build_tile_geometry(adt, info.x, info.y);
+			if (geo)
+				this._upload_queue.push({ key, geo });
+			else
+				this._loading.delete(key);
 		} catch (e) {
 			this._loading.delete(key);
 		}
@@ -240,7 +241,45 @@ class TerrainRenderer {
 		this._pump_load_queue();
 	}
 
-	_build_tile(adt, tx, ty) {
+	_process_uploads(budget = 1) {
+		while (budget-- > 0 && this._upload_queue.length > 0) {
+			const { key, geo } = this._upload_queue.shift();
+
+			if (!this._loading.has(key))
+				continue;
+
+			this._loading.delete(key);
+
+			const tile = this._upload_tile(geo);
+			this._tiles.set(key, tile);
+			this._chunk_count += tile.chunk_count;
+		}
+	}
+
+	_upload_tile(geo) {
+		const vao = new VertexArray(this.ctx);
+		vao.bind();
+		vao.set_vertex_buffer(geo.vertex_data);
+
+		const gl = this.gl;
+		const stride = 24;
+		vao.set_attribute(0, 3, gl.FLOAT, false, stride, 0);
+		vao.set_attribute(1, 3, gl.FLOAT, false, stride, 12);
+		vao.set_index_buffer(geo.index_data);
+
+		return {
+			vao,
+			chunk_bounds: geo.chunk_bounds,
+			chunk_draw: geo.chunk_draw,
+			chunk_count: geo.chunk_count,
+			x: geo.x,
+			y: geo.y,
+			bounds_min: geo.bounds_min,
+			bounds_max: geo.bounds_max
+		};
+	}
+
+	_build_tile_geometry(adt, tx, ty) {
 		let valid_chunks = 0;
 		for (let i = 0; i < 256; i++) {
 			if (adt.chunks[i]?.vertices)
@@ -361,18 +400,9 @@ class TerrainRenderer {
 			}
 		}
 
-		const vao = new VertexArray(this.ctx);
-		vao.bind();
-		vao.set_vertex_buffer(vertex_data);
-
-		const gl = this.gl;
-		const stride = 24;
-		vao.set_attribute(0, 3, gl.FLOAT, false, stride, 0);
-		vao.set_attribute(1, 3, gl.FLOAT, false, stride, 12);
-		vao.set_index_buffer(index_data);
-
 		return {
-			vao,
+			vertex_data,
+			index_data,
 			chunk_bounds,
 			chunk_draw,
 			chunk_count: chunk_idx,
@@ -511,6 +541,7 @@ class TerrainRenderer {
 		this._disposed = true;
 		this._loading.clear();
 		this._load_queue.length = 0;
+		this._upload_queue.length = 0;
 
 		for (const tile of this._tiles.values())
 			tile.vao.dispose();
