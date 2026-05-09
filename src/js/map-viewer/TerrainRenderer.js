@@ -81,6 +81,7 @@ class TerrainRenderer {
 		this._full_upload_queue = [];
 		this.full_lod_distance = DEFAULT_FULL_LOD_DISTANCE;
 		this.texture_mode = 'Flat';
+		this.render_holes = true;
 	}
 
 	get tile_info() {
@@ -417,6 +418,12 @@ class TerrainRenderer {
 		gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vao.wireframe_ebo);
 		gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, wire_indices);
 
+		gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vao.holes_ebo);
+		gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, geo.index_data_holes);
+		const holes_wire_indices = VertexArray.triangles_to_lines(geo.index_data_holes);
+		gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vao.holes_wireframe_ebo);
+		gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, holes_wire_indices);
+
 		// restore triangle EBO in VAO state
 		gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vao.ebo);
 
@@ -439,6 +446,7 @@ class TerrainRenderer {
 			full: null,
 			chunk_bounds: geo.chunk_bounds,
 			chunk_draw: geo.chunk_draw,
+			chunk_draw_holes: geo.chunk_draw_holes,
 			chunk_grid_pos: geo.chunk_grid_pos,
 			chunk_count: geo.chunk_count,
 			x: geo.x,
@@ -480,6 +488,14 @@ class TerrainRenderer {
 		gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vao.wireframe_ebo);
 		gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, MAX_TILE_WIRE_INDEX_BYTES, gl.DYNAMIC_DRAW);
 
+		vao.holes_ebo = gl.createBuffer();
+		gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vao.holes_ebo);
+		gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, MAX_TILE_INDEX_BYTES, gl.DYNAMIC_DRAW);
+
+		vao.holes_wireframe_ebo = gl.createBuffer();
+		gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vao.holes_wireframe_ebo);
+		gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, MAX_TILE_WIRE_INDEX_BYTES, gl.DYNAMIC_DRAW);
+
 		// restore triangle EBO in VAO state
 		gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vao.ebo);
 
@@ -504,9 +520,11 @@ class TerrainRenderer {
 		const vertex_data = new Float32Array(vert_count * 9);
 		const vertex_data_u8 = new Uint8Array(vertex_data.buffer);
 		const index_data = new Uint16Array(valid_chunks * 768);
+		const index_data_holes = new Uint16Array(valid_chunks * 768);
 
 		const chunk_bounds = new Float32Array(valid_chunks * 6);
 		const chunk_draw = new Uint32Array(valid_chunks * 2);
+		const chunk_draw_holes = new Uint32Array(valid_chunks * 2);
 		const chunk_grid_pos = new Uint16Array(valid_chunks * 2);
 
 		const tile_min = [Infinity, Infinity, Infinity];
@@ -529,6 +547,7 @@ class TerrainRenderer {
 		let vert_offset = 0;
 		let chunk_vert_base = 0;
 		let idx_offset = 0;
+		let holes_idx_offset = 0;
 		let chunk_idx = 0;
 
 		for (let x = 0; x < 16; x++) {
@@ -650,6 +669,46 @@ class TerrainRenderer {
 				chunk_draw[dw] = chunk_idx_start;
 				chunk_draw[dw + 1] = idx_offset - chunk_idx_start;
 
+				// holes-aware indices
+				const holes_chunk_start = holes_idx_offset;
+				const holes_high = chunk.holesHighRes;
+				const use_high_res = !!(chunk.flags & 0x10000);
+
+				for (let j = 9, xx = 0, yy = 0; j < 145; j++, xx++) {
+					if (xx >= 8) {
+						xx = 0;
+						yy++;
+					}
+
+					let is_hole;
+					if (use_high_res)
+						is_hole = (holes_high[yy] >> xx) & 1;
+					else
+						is_hole = (chunk.holesLowRes >> ((xx >> 1) + (yy >> 1) * 4)) & 1;
+
+					if (!is_hole) {
+						const ind = chunk_vert_base + j;
+						index_data_holes[holes_idx_offset++] = ind;
+						index_data_holes[holes_idx_offset++] = ind - 9;
+						index_data_holes[holes_idx_offset++] = ind + 8;
+						index_data_holes[holes_idx_offset++] = ind;
+						index_data_holes[holes_idx_offset++] = ind - 8;
+						index_data_holes[holes_idx_offset++] = ind - 9;
+						index_data_holes[holes_idx_offset++] = ind;
+						index_data_holes[holes_idx_offset++] = ind + 9;
+						index_data_holes[holes_idx_offset++] = ind - 8;
+						index_data_holes[holes_idx_offset++] = ind;
+						index_data_holes[holes_idx_offset++] = ind + 8;
+						index_data_holes[holes_idx_offset++] = ind + 9;
+					}
+
+					if (!((j + 1) % 17))
+						j += 9;
+				}
+
+				chunk_draw_holes[dw] = holes_chunk_start;
+				chunk_draw_holes[dw + 1] = holes_idx_offset - holes_chunk_start;
+
 				chunk_grid_pos[chunk_idx * 2] = x;
 				chunk_grid_pos[chunk_idx * 2 + 1] = y;
 
@@ -661,8 +720,10 @@ class TerrainRenderer {
 		return {
 			vertex_data,
 			index_data,
+			index_data_holes,
 			chunk_bounds,
 			chunk_draw,
+			chunk_draw_holes,
 			chunk_grid_pos,
 			chunk_count: chunk_idx,
 			x: tx,
@@ -1094,15 +1155,16 @@ class TerrainRenderer {
 					// no full data, draw entire tile with tex0
 					tile.adt_tex.bind(0);
 					tile.vao.bind();
-					gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tile.vao.ebo);
+					gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.render_holes ? tile.vao.holes_ebo : tile.vao.ebo);
 					visible += this._draw_tile_batched(tile, planes, gl.TRIANGLES, false);
 					continue;
 				}
 
 				// tile has full data: draw only out-of-range chunks with tex0
+				const full_draw = this.render_holes ? tile.chunk_draw_holes : tile.chunk_draw;
 				tile.adt_tex.bind(0);
 				tile.vao.bind();
-				gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tile.vao.ebo);
+				gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.render_holes ? tile.vao.holes_ebo : tile.vao.ebo);
 
 				let batch_start = -1;
 				let batch_count = 0;
@@ -1116,8 +1178,8 @@ class TerrainRenderer {
 					const in_lod = Math.abs(chunk_cx - cam_cx) <= lod && Math.abs(chunk_cy - cam_cy) <= lod;
 
 					if (!in_lod && this._is_aabb_visible(tile.chunk_bounds, bo, planes)) {
-						const offset = tile.chunk_draw[dw];
-						const idx_count = tile.chunk_draw[dw + 1];
+						const offset = full_draw[dw];
+						const idx_count = full_draw[dw + 1];
 
 						if (batch_start === -1) {
 							batch_start = offset;
@@ -1164,8 +1226,9 @@ class TerrainRenderer {
 			if (tile.full.alpha_tex)
 				this.ctx.bind_texture(8, tile.full.alpha_tex, gl.TEXTURE_2D_ARRAY);
 
+			const chunk_draw = this.render_holes ? tile.chunk_draw_holes : tile.chunk_draw;
 			tile.vao.bind();
-			gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tile.vao.ebo);
+			gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.render_holes ? tile.vao.holes_ebo : tile.vao.ebo);
 
 			for (let i = 0; i < tile.chunk_count; i++) {
 				const meta = tile.full.chunk_meta[i];
@@ -1200,7 +1263,7 @@ class TerrainRenderer {
 				}
 
 				const dw = i * 2;
-				gl.drawElements(gl.TRIANGLES, tile.chunk_draw[dw + 1], gl.UNSIGNED_SHORT, tile.chunk_draw[dw] * 2);
+				gl.drawElements(gl.TRIANGLES, chunk_draw[dw + 1], gl.UNSIGNED_SHORT, chunk_draw[dw] * 2);
 				visible++;
 			}
 		}
@@ -1231,7 +1294,7 @@ class TerrainRenderer {
 				continue;
 
 			tile.vao.bind();
-			gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tile.vao.ebo);
+			gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.render_holes ? tile.vao.holes_ebo : tile.vao.ebo);
 			visible += this._draw_tile_batched(tile, planes, gl.TRIANGLES, false);
 		}
 
@@ -1265,7 +1328,7 @@ class TerrainRenderer {
 					continue;
 
 				tile.vao.bind();
-				gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tile.vao.ebo);
+				gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.render_holes ? tile.vao.holes_ebo : tile.vao.ebo);
 				this._draw_tile_batched(tile, planes, gl.TRIANGLES, false);
 			}
 
@@ -1280,7 +1343,7 @@ class TerrainRenderer {
 				continue;
 
 			tile.vao.bind();
-			gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tile.vao.wireframe_ebo);
+			gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.render_holes ? tile.vao.holes_wireframe_ebo : tile.vao.wireframe_ebo);
 			visible += this._draw_tile_batched(tile, planes, gl.LINES, true);
 		}
 
@@ -1311,7 +1374,7 @@ class TerrainRenderer {
 
 			tile.minimap_tex.bind(0);
 			tile.vao.bind();
-			gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tile.vao.ebo);
+			gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.render_holes ? tile.vao.holes_ebo : tile.vao.ebo);
 			visible += this._draw_tile_batched(tile, planes, gl.TRIANGLES, false);
 		}
 
@@ -1342,7 +1405,7 @@ class TerrainRenderer {
 
 			tile.adt_tex.bind(0);
 			tile.vao.bind();
-			gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tile.vao.ebo);
+			gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.render_holes ? tile.vao.holes_ebo : tile.vao.ebo);
 			visible += this._draw_tile_batched(tile, planes, gl.TRIANGLES, false);
 		}
 
@@ -1352,7 +1415,7 @@ class TerrainRenderer {
 	_draw_tile_batched(tile, planes, mode, is_wireframe) {
 		const gl = this.gl;
 		const bounds = tile.chunk_bounds;
-		const draw = tile.chunk_draw;
+		const draw = this.render_holes ? tile.chunk_draw_holes : tile.chunk_draw;
 		const scale = is_wireframe ? 2 : 1;
 
 		let batch_start = -1;

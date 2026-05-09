@@ -45,6 +45,7 @@ const SECTIONS = [
 			{ type: 'color', key: 'mapViewerTerrainColor', label: 'Terrain Colour', visible_mode: 'Flat' },
 			{ type: 'color', key: 'mapViewerWireframeColor', label: 'Wireframe Colour', visible_mode: 'Wireframe' },
 			{ type: 'checkbox', key: 'mapViewerWireframeOcclusion', label: 'Depth Occlusion', visible_mode: 'Wireframe' },
+			{ type: 'checkbox', data_key: 'render_holes', label: 'Render Holes' },
 			{ type: 'checkbox', data_key: 'show_adt_bounds', label: 'Show ADT Region Bounds' }
 		]
 	},
@@ -153,6 +154,7 @@ module.exports = {
 			sections: SECTIONS,
 			texture_mode: 'Flat',
 			full_lod_distance: 12,
+			render_holes: true,
 			show_adt_bounds: false
 		};
 	},
@@ -217,6 +219,11 @@ module.exports = {
 		full_lod_distance(val) {
 			if (this._terrain)
 				this._terrain.set_full_lod_distance(val);
+		},
+
+		render_holes(val) {
+			if (this._terrain)
+				this._terrain.render_holes = val;
 		}
 	},
 
