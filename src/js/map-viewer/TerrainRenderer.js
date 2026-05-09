@@ -6,6 +6,7 @@ const Shaders = require('../3D/Shaders');
 const VertexArray = require('../3D/gl/VertexArray');
 const GLTexture = require('../3D/gl/GLTexture');
 const BLPFile = require('../casc/blp');
+const TEXLoader = require('../3D/loaders/TEXLoader');
 
 const MAP_SIZE = constants.GAME.MAP_SIZE;
 const TILE_SIZE = constants.GAME.TILE_SIZE;
@@ -17,6 +18,10 @@ const MAX_CONCURRENT_LOADS = 4;
 const UNLOAD_PADDING = 2;
 const DEFAULT_RENDER_DISTANCE = 8;
 const GRID_Y_BIAS = 0.5;
+
+const ADT_TEX_TILE_REPEAT = 8;
+const ADT_TEX_CHUNK_RES = 64;
+const ADT_TEX_ATLAS_RES = ADT_TEX_CHUNK_RES * 16;
 
 // 256 chunks x 145 verts x 32 bytes (pos3f + normal3f + uv2f)
 const MAX_TILE_VERTEX_BYTES = 256 * 145 * 32;
@@ -44,6 +49,8 @@ class TerrainRenderer {
 		this._map_dir = null;
 		this._chunk_count = 0;
 		this._disposed = false;
+		this._wdt = null;
+		this._tex_loader = null;
 
 		this._last_tx = NaN;
 		this._last_ty = NaN;
@@ -99,6 +106,8 @@ class TerrainRenderer {
 		const wdt = new WDTLoader(wdt_file);
 		wdt.load();
 
+		this._wdt = wdt;
+
 		if (!wdt.entries)
 			throw new Error('WDT has no tile entries');
 
@@ -115,7 +124,7 @@ class TerrainRenderer {
 					continue;
 
 				const key = x + '_' + y;
-				this._tile_info.set(key, { root_id: entry.rootADT, x, y });
+				this._tile_info.set(key, { root_id: entry.rootADT, tex0_id: entry.tex0ADT, x, y });
 
 				if (x < min_tx) min_tx = x;
 				if (y < min_ty) min_ty = y;
@@ -132,6 +141,16 @@ class TerrainRenderer {
 			0,
 			(32 - center_tx) * TILE_SIZE
 		];
+
+		if (wdt.texFileDataID > 0) {
+			try {
+				const tex_file = await this._casc.getFile(wdt.texFileDataID);
+				this._tex_loader = new TEXLoader(tex_file);
+				this._tex_loader.load();
+			} catch (e) {
+				// tex blob not available
+			}
+		}
 	}
 
 	update(camera_pos) {
@@ -159,6 +178,9 @@ class TerrainRenderer {
 			if (Math.abs(tile.x - center_tx) > ud || Math.abs(tile.y - center_ty) > ud) {
 				if (tile.minimap_tex)
 					tile.minimap_tex.dispose();
+
+				if (tile.adt_tex)
+					tile.adt_tex.dispose();
 
 				this._release_vao(tile.vao);
 				this._chunk_count -= tile.chunk_count;
@@ -230,23 +252,15 @@ class TerrainRenderer {
 				return;
 			}
 
-			// load minimap texture alongside geometry
-			let minimap_blp = null;
-			try {
-				const px = info.x.toString().padStart(2, '0');
-				const py = info.y.toString().padStart(2, '0');
-				const blp_path = 'world/minimaps/' + this._map_dir + '/map' + py + '_' + px + '.blp';
-				const blp_data = await this._casc.getFileByName(blp_path, false, true);
-				if (blp_data)
-					minimap_blp = new BLPFile(blp_data);
-			} catch {
-				// minimap not available for this tile
-			}
+			const [minimap_blp, adt_tex_pixels] = await Promise.all([
+				this._load_minimap_blp(info),
+				this._load_adt_tex(info)
+			]);
 
 			if (!this._loading.has(key))
 				return this._pump_load_queue();
 
-			this._upload_queue.push({ key, geo, minimap_blp });
+			this._upload_queue.push({ key, geo, minimap_blp, adt_tex_pixels });
 		} catch (e) {
 			this._loading.delete(key);
 		}
@@ -254,23 +268,111 @@ class TerrainRenderer {
 		this._pump_load_queue();
 	}
 
+	async _load_minimap_blp(info) {
+		try {
+			const px = info.x.toString().padStart(2, '0');
+			const py = info.y.toString().padStart(2, '0');
+			const blp_path = 'world/minimaps/' + this._map_dir + '/map' + py + '_' + px + '.blp';
+			const blp_data = await this._casc.getFileByName(blp_path, false, true);
+			if (blp_data)
+				return new BLPFile(blp_data);
+		} catch {}
+		return null;
+	}
+
+	async _load_adt_tex(info) {
+		if (!this._tex_loader || !info.tex0_id || info.tex0_id <= 0)
+			return null;
+
+		try {
+			const tex0_file = await this._casc.getFile(info.tex0_id);
+			const tex_adt = new ADTLoader(tex0_file);
+			tex_adt.loadTex(this._wdt);
+			return this._composite_tile(tex_adt);
+		} catch {}
+		return null;
+	}
+
+	_composite_tile(tex_adt) {
+		const diffuse_ids = tex_adt.diffuseTextureFileDataIDs;
+		if (!diffuse_ids)
+			return null;
+
+		const atlas = new Uint8Array(ADT_TEX_ATLAS_RES * ADT_TEX_ATLAS_RES * 4);
+
+		for (let cx = 0; cx < 16; cx++) {
+			for (let cy = 0; cy < 16; cy++) {
+				const chunk = tex_adt.texChunks[cx * 16 + cy];
+				if (!chunk?.layers || chunk.layers.length === 0)
+					continue;
+
+				this._composite_chunk(atlas, cx, cy, chunk, diffuse_ids);
+			}
+		}
+
+		return atlas;
+	}
+
+	_composite_chunk(atlas, cx, cy, chunk, diffuse_ids) {
+		const layers = chunk.layers;
+		const alpha_layers = chunk.alphaLayers;
+		const base_px = cy * ADT_TEX_CHUNK_RES;
+		const base_py = cx * ADT_TEX_CHUNK_RES;
+
+		for (let py = 0; py < ADT_TEX_CHUNK_RES; py++) {
+			for (let px = 0; px < ADT_TEX_CHUNK_RES; px++) {
+				const u = (px / ADT_TEX_CHUNK_RES) * ADT_TEX_TILE_REPEAT;
+				const v = (py / ADT_TEX_CHUNK_RES) * ADT_TEX_TILE_REPEAT;
+
+				let r = 0, g = 0, b = 0;
+
+				for (let li = 0; li < layers.length; li++) {
+					const tex = this._tex_loader.get_texture(diffuse_ids[layers[li].textureId]);
+					if (!tex)
+						continue;
+
+					const tx = Math.floor(u * tex.width) % tex.width;
+					const ty = Math.floor(v * tex.height) % tex.height;
+					const ti = (ty * tex.width + tx) * 4;
+
+					if (li === 0) {
+						r = tex.pixels[ti];
+						g = tex.pixels[ti + 1];
+						b = tex.pixels[ti + 2];
+					} else {
+						const a = alpha_layers?.[li] ? alpha_layers[li][py * 64 + px] / 255 : 0;
+						r += (tex.pixels[ti] - r) * a;
+						g += (tex.pixels[ti + 1] - g) * a;
+						b += (tex.pixels[ti + 2] - b) * a;
+					}
+				}
+
+				const dst = ((base_py + py) * ADT_TEX_ATLAS_RES + (base_px + px)) * 4;
+				atlas[dst] = r;
+				atlas[dst + 1] = g;
+				atlas[dst + 2] = b;
+				atlas[dst + 3] = 255;
+			}
+		}
+	}
+
 	_process_uploads(budget = 1) {
 		while (budget-- > 0 && this._upload_queue.length > 0) {
-			const { key, geo, minimap_blp } = this._upload_queue.shift();
+			const { key, geo, minimap_blp, adt_tex_pixels } = this._upload_queue.shift();
 
 			if (!this._loading.has(key))
 				continue;
 
 			this._loading.delete(key);
 
-			const tile = this._upload_tile(geo, minimap_blp);
+			const tile = this._upload_tile(geo, minimap_blp, adt_tex_pixels);
 			this._tiles.set(key, tile);
 			this._chunk_count += tile.chunk_count;
 			this._grid_dirty = true;
 		}
 	}
 
-	_upload_tile(geo, minimap_blp) {
+	_upload_tile(geo, minimap_blp, adt_tex_pixels) {
 		const vao = this._acquire_vao();
 		const gl = this.gl;
 
@@ -293,9 +395,16 @@ class TerrainRenderer {
 			minimap_tex.set_blp(minimap_blp);
 		}
 
+		let adt_tex = null;
+		if (adt_tex_pixels) {
+			adt_tex = new GLTexture(this.ctx);
+			adt_tex.set_rgba(adt_tex_pixels, ADT_TEX_ATLAS_RES, ADT_TEX_ATLAS_RES, { generate_mipmaps: true });
+		}
+
 		return {
 			vao,
 			minimap_tex,
+			adt_tex,
 			chunk_bounds: geo.chunk_bounds,
 			chunk_draw: geo.chunk_draw,
 			chunk_count: geo.chunk_count,
@@ -618,6 +727,37 @@ class TerrainRenderer {
 				continue;
 
 			tile.minimap_tex.bind(0);
+			tile.vao.bind();
+			gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tile.vao.ebo);
+			visible += this._draw_tile_batched(tile, planes, gl.TRIANGLES, false);
+		}
+
+		return visible;
+	}
+
+	render_adt_tex(view_matrix, projection_matrix) {
+		if (!this.minimap_shader.is_valid() || this._tiles.size === 0)
+			return 0;
+
+		this.minimap_shader.use();
+		this.minimap_shader.set_uniform_mat4('u_view', false, view_matrix);
+		this.minimap_shader.set_uniform_mat4('u_projection', false, projection_matrix);
+		this.minimap_shader.set_uniform_1i('u_minimap', 0);
+		this.minimap_shader.set_uniform_3fv('u_light_dir', this.light_dir);
+		this.minimap_shader.set_uniform_3fv('u_sun_color', this.sun_color);
+		this.minimap_shader.set_uniform_1f('u_sun_intensity', this.sun_intensity);
+
+		this._compute_frustum(view_matrix, projection_matrix);
+
+		const gl = this.gl;
+		const planes = this._frustum_planes;
+		let visible = 0;
+
+		for (const tile of this._tiles.values()) {
+			if (!tile.adt_tex || !this._is_tile_visible(tile, planes))
+				continue;
+
+			tile.adt_tex.bind(0);
 			tile.vao.bind();
 			gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tile.vao.ebo);
 			visible += this._draw_tile_batched(tile, planes, gl.TRIANGLES, false);
@@ -962,6 +1102,9 @@ class TerrainRenderer {
 			if (tile.minimap_tex)
 				tile.minimap_tex.dispose();
 
+			if (tile.adt_tex)
+				tile.adt_tex.dispose();
+
 			tile.vao.dispose();
 		}
 
@@ -971,6 +1114,11 @@ class TerrainRenderer {
 			vao.dispose();
 
 		this._vao_pool.length = 0;
+
+		if (this._tex_loader) {
+			this._tex_loader.dispose();
+			this._tex_loader = null;
+		}
 
 		if (this._grid_vao) {
 			this._grid_vao.dispose();

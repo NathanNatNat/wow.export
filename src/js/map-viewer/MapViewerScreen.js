@@ -40,7 +40,7 @@ const SECTIONS = [
 		id: 'terrain',
 		label: 'Terrain',
 		controls: [
-			{ type: 'dropdown', data_key: 'texture_mode', label: 'Texture Mode', options: ['Flat', 'Wireframe', 'Minimap'] },
+			{ type: 'dropdown', data_key: 'texture_mode', label: 'Texture Mode', options: ['Flat', 'Wireframe', 'Minimap', 'ADT Tex'] },
 			{ type: 'color', key: 'mapViewerTerrainColor', label: 'Terrain Colour', visible_mode: 'Flat' },
 			{ type: 'color', key: 'mapViewerWireframeColor', label: 'Wireframe Colour', visible_mode: 'Wireframe' },
 			{ type: 'checkbox', key: 'mapViewerWireframeOcclusion', label: 'Depth Occlusion', visible_mode: 'Wireframe' },
@@ -332,6 +332,8 @@ module.exports = {
 						visible = this._terrain.render_wireframe(this._camera.view_matrix, this._camera.projection_matrix, this._wireframe_color, sky, core.view.config.mapViewerWireframeOcclusion);
 					} else if (this.texture_mode === 'Minimap') {
 						visible = this._terrain.render_minimap(this._camera.view_matrix, this._camera.projection_matrix);
+					} else if (this.texture_mode === 'ADT Tex') {
+						visible = this._terrain.render_adt_tex(this._camera.view_matrix, this._camera.projection_matrix);
 					} else {
 						visible = this._terrain.render(this._camera.view_matrix, this._camera.projection_matrix, this._terrain_color);
 					}
