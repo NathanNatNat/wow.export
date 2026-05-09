@@ -309,6 +309,7 @@ const makeNewView = () => {
 			{ label: 'Alpha Maps', value: -1 },
 			{ label: 'None', value: 0 },
 			{ label: 'Minimap (512)', value: 512 },
+			{ label: 'ADT LoD (1k)', value: -2 },
 			{ label: 'Low (1k)', value: 1024 },
 			{ label: 'Medium (4k)', value: 4096 },
 			{ label: 'High (8k)', value: 8192 },

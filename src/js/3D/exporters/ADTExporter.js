@@ -36,6 +36,88 @@ const CHUNK_SIZE = TILE_SIZE / 16;
 const UNIT_SIZE = CHUNK_SIZE / 8;
 const UNIT_SIZE_HALF = UNIT_SIZE / 2;
 
+const TEX0_ATLAS_RES = 1024;
+const TEX0_CHUNK_RES = 64;
+const TEX0_TILE_REPEAT = 8;
+
+/**
+ * composite tex0 layers into a 1024x1024 RGBA atlas.
+ * @param {object} texAdt
+ * @param {object} casc
+ * @returns {Promise<Uint8Array|null>}
+ */
+const composite_tex0 = async (texAdt, casc) => {
+	const diffuse_ids = texAdt.diffuseTextureFileDataIDs;
+	if (!diffuse_ids)
+		return null;
+
+	const textures = new Map();
+	for (const id of diffuse_ids) {
+		if (id > 0 && !textures.has(id)) {
+			try {
+				const blp = new BLPFile(await casc.getFile(id));
+				const pixels = blp.toUInt8Array(0, 0b0111);
+				textures.set(id, { pixels, width: blp.scaledWidth, height: blp.scaledHeight });
+			} catch {
+				textures.set(id, null);
+			}
+		}
+	}
+
+	const atlas = new Uint8Array(TEX0_ATLAS_RES * TEX0_ATLAS_RES * 4);
+
+	for (let cx = 0; cx < 16; cx++) {
+		for (let cy = 0; cy < 16; cy++) {
+			const chunk = texAdt.texChunks[cx * 16 + cy];
+			if (!chunk?.layers || chunk.layers.length === 0)
+				continue;
+
+			const layers = chunk.layers;
+			const alpha_layers = chunk.alphaLayers;
+			const base_px = cy * TEX0_CHUNK_RES;
+			const base_py = cx * TEX0_CHUNK_RES;
+
+			for (let py = 0; py < TEX0_CHUNK_RES; py++) {
+				for (let px = 0; px < TEX0_CHUNK_RES; px++) {
+					const u = (px / TEX0_CHUNK_RES) * TEX0_TILE_REPEAT;
+					const v = (py / TEX0_CHUNK_RES) * TEX0_TILE_REPEAT;
+
+					let r = 0, g = 0, b = 0;
+
+					for (let li = 0; li < layers.length; li++) {
+						const tex = textures.get(diffuse_ids[layers[li].textureId]);
+						if (!tex)
+							continue;
+
+						const tx = Math.floor(u * tex.width) % tex.width;
+						const ty = Math.floor(v * tex.height) % tex.height;
+						const ti = (ty * tex.width + tx) * 4;
+
+						if (li === 0) {
+							r = tex.pixels[ti];
+							g = tex.pixels[ti + 1];
+							b = tex.pixels[ti + 2];
+						} else {
+							const a = alpha_layers?.[li] ? alpha_layers[li][py * 64 + px] / 255 : 0;
+							r += (tex.pixels[ti] - r) * a;
+							g += (tex.pixels[ti + 1] - g) * a;
+							b += (tex.pixels[ti + 2] - b) * a;
+						}
+					}
+
+					const dst = ((base_py + py) * TEX0_ATLAS_RES + (base_px + px)) * 4;
+					atlas[dst] = r;
+					atlas[dst + 1] = g;
+					atlas[dst + 2] = b;
+					atlas[dst + 3] = 255;
+				}
+			}
+		}
+	}
+
+	return atlas;
+};
+
 const wdtCache = new Map();
 
 let isFoliageAvailable = false;
@@ -427,6 +509,7 @@ class ADTExporter {
 			const firstChunkY = firstChunk.position[1];
 
 			const isAlphaMaps = quality === -1;
+			const isTex0 = quality === -2;
 			const isLargeBake = quality >= 8192;
 			const isSplittingAlphaMaps = isAlphaMaps && core.view.config.splitAlphaMaps;
 			const isSplittingTextures = isLargeBake && core.view.config.splitLargeTerrainBakes;
@@ -857,6 +940,20 @@ class ADTExporter {
 							json.addProperty('vertexColors', vertexColors);
 
 						await json.write();
+					}
+				} else if (isTex0) {
+					// composite tex0 layers into a 1k atlas.
+					const tileOutPath = path.join(dir, 'tex_' + this.tileID + '.png');
+
+					if (config.overwriteFiles || !await generics.fileExists(tileOutPath)) {
+						const atlas = await composite_tex0(texAdt, casc);
+						if (atlas) {
+							const png = new PNGWriter(TEX0_ATLAS_RES, TEX0_ATLAS_RES);
+							png.getPixelData().set(atlas);
+							await png.write(tileOutPath);
+						}
+					} else {
+						log.write('Skipping ADT tex0 bake of %s (file exists, overwrite disabled)', tileOutPath);
 					}
 				} else if (quality <= 512) {
 					// Use minimaps for cheap textures.
