@@ -154,7 +154,7 @@ module.exports = {
 			show_ui: true,
 			open_section: null,
 			sections: SECTIONS,
-			texture_mode: 'Flat',
+			texture_mode: 'ADT Tex',
 			full_lod_distance: 12,
 			render_holes: true,
 			show_adt_bounds: false,
