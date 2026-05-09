@@ -163,6 +163,26 @@ class ShaderProgram {
 
 	/**
 	 * @param {string} name
+	 * @param {Int32Array|Array} value
+	 */
+	set_uniform_1iv(name, value) {
+		const loc = this.get_uniform_location(name);
+		if (loc !== null)
+			this.gl.uniform1iv(loc, value);
+	}
+
+	/**
+	 * @param {string} name
+	 * @param {Float32Array|Array} value
+	 */
+	set_uniform_1fv(name, value) {
+		const loc = this.get_uniform_location(name);
+		if (loc !== null)
+			this.gl.uniform1fv(loc, value);
+	}
+
+	/**
+	 * @param {string} name
 	 * @param {number} x
 	 * @param {number} y
 	 */

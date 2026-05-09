@@ -40,7 +40,8 @@ const SECTIONS = [
 		id: 'terrain',
 		label: 'Terrain',
 		controls: [
-			{ type: 'dropdown', data_key: 'texture_mode', label: 'Texture Mode', options: ['Flat', 'Wireframe', 'Minimap', 'ADT Tex'] },
+			{ type: 'dropdown', data_key: 'texture_mode', label: 'Texture Mode', options: ['Flat', 'Wireframe', 'Minimap', 'ADT Tex', 'Full'] },
+			{ type: 'slider', data_key: 'full_lod_distance', label: 'Tex LoD Distance', min: 1, max: 5, step: 1, visible_mode: 'Full' },
 			{ type: 'color', key: 'mapViewerTerrainColor', label: 'Terrain Colour', visible_mode: 'Flat' },
 			{ type: 'color', key: 'mapViewerWireframeColor', label: 'Wireframe Colour', visible_mode: 'Wireframe' },
 			{ type: 'checkbox', key: 'mapViewerWireframeOcclusion', label: 'Depth Occlusion', visible_mode: 'Wireframe' },
@@ -108,10 +109,10 @@ module.exports = {
 										:min="ctrl.min"
 										:max="ctrl.max"
 										:step="ctrl.step"
-										:value="config[ctrl.key]"
-										@input="config[ctrl.key] = Number($event.target.value)"
+										:value="get_ctrl_value(ctrl)"
+										@input="set_ctrl_value(ctrl, Number($event.target.value))"
 									/>
-									<span class="mv-panel-value">{{ config[ctrl.key] }}</span>
+									<span class="mv-panel-value">{{ get_ctrl_value(ctrl) }}</span>
 								</div>
 								<div v-if="ctrl.type === 'color'" class="mv-panel-color-row">
 									<label class="mv-panel-label">{{ ctrl.label }}</label>
@@ -151,6 +152,7 @@ module.exports = {
 			open_section: null,
 			sections: SECTIONS,
 			texture_mode: 'Flat',
+			full_lod_distance: 1,
 			show_adt_bounds: false
 		};
 	},
@@ -205,6 +207,16 @@ module.exports = {
 				this._init_minimap();
 			else
 				this._dispose_minimap();
+		},
+
+		texture_mode(val) {
+			if (this._terrain)
+				this._terrain.set_texture_mode(val);
+		},
+
+		full_lod_distance(val) {
+			if (this._terrain)
+				this._terrain.full_lod_distance = val;
 		}
 	},
 
@@ -334,6 +346,8 @@ module.exports = {
 						visible = this._terrain.render_minimap(this._camera.view_matrix, this._camera.projection_matrix);
 					} else if (this.texture_mode === 'ADT Tex') {
 						visible = this._terrain.render_adt_tex(this._camera.view_matrix, this._camera.projection_matrix);
+					} else if (this.texture_mode === 'Full') {
+						visible = this._terrain.render_full(this._camera.view_matrix, this._camera.projection_matrix);
 					} else {
 						visible = this._terrain.render(this._camera.view_matrix, this._camera.projection_matrix, this._terrain_color);
 					}

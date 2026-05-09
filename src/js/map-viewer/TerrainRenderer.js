@@ -23,8 +23,12 @@ const ADT_TEX_TILE_REPEAT = 8;
 const ADT_TEX_CHUNK_RES = 64;
 const ADT_TEX_ATLAS_RES = ADT_TEX_CHUNK_RES * 16;
 
-// 256 chunks x 145 verts x 32 bytes (pos3f + normal3f + uv2f)
-const MAX_TILE_VERTEX_BYTES = 256 * 145 * 32;
+const MAX_FULL_CONCURRENT_LOADS = 2;
+const FULL_UPLOAD_BUDGET = 4;
+const DEFAULT_FULL_LOD_DISTANCE = 1;
+
+// 256 chunks x 145 verts x 36 bytes (pos3f + normal3f + uv2f + color4ub)
+const MAX_TILE_VERTEX_BYTES = 256 * 145 * 36;
 // 256 chunks x 768 indices x 2 bytes (uint16)
 const MAX_TILE_INDEX_BYTES = 256 * 768 * 2;
 // wireframe: each triangle (3 indices) becomes 3 line pairs (6 indices)
@@ -37,6 +41,8 @@ class TerrainRenderer {
 		this.shader = Shaders.create_program(gl_context, 'mpv_terrain');
 		this.wire_shader = Shaders.create_program(gl_context, 'mpv_terrain_wire');
 		this.minimap_shader = Shaders.create_program(gl_context, 'mpv_terrain_minimap');
+		this.full_shader = Shaders.create_program(gl_context, 'mpv_terrain_full');
+		this.full_legacy_shader = Shaders.create_program(gl_context, 'mpv_terrain_full_legacy');
 		this.render_distance = DEFAULT_RENDER_DISTANCE;
 		this.map_center = [0, 0, 0];
 
@@ -66,6 +72,13 @@ class TerrainRenderer {
 		this._grid_vao = null;
 		this._grid_vertex_count = 0;
 		this._grid_dirty = true;
+
+		this._texture_cache = new Map();
+		this._full_loading = new Set();
+		this._full_load_queue = [];
+		this._full_upload_queue = [];
+		this.full_lod_distance = DEFAULT_FULL_LOD_DISTANCE;
+		this.texture_mode = 'Flat';
 	}
 
 	get tile_info() {
@@ -166,7 +179,12 @@ class TerrainRenderer {
 			this._grid_dirty = true;
 		}
 
+		if (this.texture_mode === 'Full')
+			this._update_full_textures(tx, ty);
+
+		this._process_full_uploads();
 		this._pump_load_queue();
+		this._pump_full_load_queue();
 	}
 
 	_update_needed_tiles(center_tx, center_ty) {
@@ -182,6 +200,7 @@ class TerrainRenderer {
 				if (tile.adt_tex)
 					tile.adt_tex.dispose();
 
+				this._unload_full_tile(tile);
 				this._release_vao(tile.vao);
 				this._chunk_count -= tile.chunk_count;
 				this._tiles.delete(key);
@@ -405,8 +424,10 @@ class TerrainRenderer {
 			vao,
 			minimap_tex,
 			adt_tex,
+			full: null,
 			chunk_bounds: geo.chunk_bounds,
 			chunk_draw: geo.chunk_draw,
+			chunk_grid_pos: geo.chunk_grid_pos,
 			chunk_count: geo.chunk_count,
 			x: geo.x,
 			y: geo.y,
@@ -428,13 +449,15 @@ class TerrainRenderer {
 		gl.bindBuffer(gl.ARRAY_BUFFER, vao.vbo);
 		gl.bufferData(gl.ARRAY_BUFFER, MAX_TILE_VERTEX_BYTES, gl.DYNAMIC_DRAW);
 
-		const stride = 32;
+		const stride = 36;
 		gl.enableVertexAttribArray(0);
 		gl.vertexAttribPointer(0, 3, gl.FLOAT, false, stride, 0);
 		gl.enableVertexAttribArray(1);
 		gl.vertexAttribPointer(1, 3, gl.FLOAT, false, stride, 12);
 		gl.enableVertexAttribArray(2);
 		gl.vertexAttribPointer(2, 2, gl.FLOAT, false, stride, 24);
+		gl.enableVertexAttribArray(3);
+		gl.vertexAttribPointer(3, 4, gl.UNSIGNED_BYTE, true, stride, 32);
 
 		vao.ebo = gl.createBuffer();
 		gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vao.ebo);
@@ -466,11 +489,13 @@ class TerrainRenderer {
 			return null;
 
 		const vert_count = valid_chunks * 145;
-		const vertex_data = new Float32Array(vert_count * 8);
+		const vertex_data = new Float32Array(vert_count * 9);
+		const vertex_data_u8 = new Uint8Array(vertex_data.buffer);
 		const index_data = new Uint16Array(valid_chunks * 768);
 
 		const chunk_bounds = new Float32Array(valid_chunks * 6);
 		const chunk_draw = new Uint32Array(valid_chunks * 2);
+		const chunk_grid_pos = new Uint16Array(valid_chunks * 2);
 
 		const tile_min = [Infinity, Infinity, Infinity];
 		const tile_max = [-Infinity, -Infinity, -Infinity];
@@ -519,7 +544,7 @@ class TerrainRenderer {
 						if (is_short)
 							vx -= UNIT_SIZE_HALF;
 
-						const di = vert_offset * 8;
+						const di = vert_offset * 9;
 						vertex_data[di] = vx;
 						vertex_data[di + 1] = vy;
 						vertex_data[di + 2] = vz;
@@ -536,6 +561,21 @@ class TerrainRenderer {
 						const col_frac = is_short ? (col + 0.5) / 8 : col / 8;
 						vertex_data[di + 6] = (y + col_frac) / 16;
 						vertex_data[di + 7] = (x + row / 16) / 16;
+
+						// vertex color (MCCV)
+						const ci = vert_offset * 36 + 32;
+						if (chunk.vertexShading) {
+							const shade = chunk.vertexShading[idx];
+							vertex_data_u8[ci] = shade.r;
+							vertex_data_u8[ci + 1] = shade.g;
+							vertex_data_u8[ci + 2] = shade.b;
+							vertex_data_u8[ci + 3] = shade.a;
+						} else {
+							vertex_data_u8[ci] = 127;
+							vertex_data_u8[ci + 1] = 127;
+							vertex_data_u8[ci + 2] = 127;
+							vertex_data_u8[ci + 3] = 255;
+						}
 
 						if (vx < tile_min[0]) tile_min[0] = vx;
 						if (vy < tile_min[1]) tile_min[1] = vy;
@@ -598,6 +638,9 @@ class TerrainRenderer {
 				chunk_draw[dw] = chunk_idx_start;
 				chunk_draw[dw + 1] = idx_offset - chunk_idx_start;
 
+				chunk_grid_pos[chunk_idx * 2] = x;
+				chunk_grid_pos[chunk_idx * 2 + 1] = y;
+
 				chunk_idx++;
 				chunk_vert_base += 145;
 			}
@@ -608,6 +651,7 @@ class TerrainRenderer {
 			index_data,
 			chunk_bounds,
 			chunk_draw,
+			chunk_grid_pos,
 			chunk_count: chunk_idx,
 			x: tx,
 			y: ty,
@@ -623,6 +667,468 @@ class TerrainRenderer {
 				step_z: h_step_z
 			}
 		};
+	}
+
+	set_texture_mode(mode) {
+		const prev = this.texture_mode;
+		this.texture_mode = mode;
+
+		if (prev === 'Full' && mode !== 'Full')
+			this._dispose_all_full();
+	}
+
+	_update_full_textures(cam_tx, cam_ty) {
+		const lod = this.full_lod_distance;
+
+		// unload tiles outside LoD range
+		for (const [key, tile] of this._tiles) {
+			if (!tile.full)
+				continue;
+
+			if (Math.abs(tile.x - cam_tx) > lod || Math.abs(tile.y - cam_ty) > lod)
+				this._unload_full_tile(tile);
+		}
+
+		// cancel in-flight full loads outside range
+		for (const key of this._full_loading) {
+			const tile = this._tiles.get(key);
+			if (!tile || Math.abs(tile.x - cam_tx) > lod || Math.abs(tile.y - cam_ty) > lod)
+				this._full_loading.delete(key);
+		}
+
+		// queue tiles in LoD range that need full textures
+		const to_load = [];
+		for (const [key, tile] of this._tiles) {
+			if (tile.full || this._full_loading.has(key))
+				continue;
+
+			if (Math.abs(tile.x - cam_tx) <= lod && Math.abs(tile.y - cam_ty) <= lod)
+				to_load.push({ key, dist: (tile.x - cam_tx) ** 2 + (tile.y - cam_ty) ** 2 });
+		}
+
+		to_load.sort((a, b) => a.dist - b.dist);
+		this._full_load_queue = to_load.map(e => e.key);
+	}
+
+	_pump_full_load_queue() {
+		if (this._disposed || this.texture_mode !== 'Full')
+			return;
+
+		while (this._full_loading.size < MAX_FULL_CONCURRENT_LOADS && this._full_load_queue.length > 0) {
+			const key = this._full_load_queue.shift();
+			const tile = this._tiles.get(key);
+
+			if (!tile || tile.full || this._full_loading.has(key))
+				continue;
+
+			this._start_full_load(key);
+		}
+	}
+
+	async _start_full_load(key) {
+		this._full_loading.add(key);
+		const tile = this._tiles.get(key);
+		const info = this._tile_info.get(key);
+
+		if (!tile || !info?.tex0_id || info.tex0_id <= 0) {
+			this._full_loading.delete(key);
+			return;
+		}
+
+		try {
+			const tex0_file = await this._casc.getFile(info.tex0_id);
+			if (!this._full_loading.has(key))
+				return;
+
+			const tex_adt = new ADTLoader(tex0_file);
+			tex_adt.loadTex(this._wdt);
+
+			const diffuse_ids = tex_adt.diffuseTextureFileDataIDs;
+			const height_ids = tex_adt.heightTextureFileDataIDs;
+			const tex_params = tex_adt.texParams;
+			const has_height = (this._wdt.flags & 0x80) === 0x80;
+
+			if (!diffuse_ids) {
+				this._full_loading.delete(key);
+				return;
+			}
+
+			// collect unique file IDs needed by this tile
+			const unique_ids = new Set();
+			for (let i = 0; i < tile.chunk_count; i++) {
+				const grid_idx = tile.chunk_grid_pos[i * 2] * 16 + tile.chunk_grid_pos[i * 2 + 1];
+				const tex_chunk = tex_adt.texChunks[grid_idx];
+				if (!tex_chunk?.layers)
+					continue;
+
+				for (const layer of tex_chunk.layers) {
+					const did = diffuse_ids[layer.textureId];
+					if (did > 0)
+						unique_ids.add(did);
+
+					if (has_height && height_ids) {
+						const hid = height_ids[layer.textureId];
+						if (hid > 0)
+							unique_ids.add(hid);
+					}
+				}
+			}
+
+			// fetch and parse all textures in parallel (no GPU upload)
+			await Promise.all([...unique_ids].map(id => this._cache_texture_data(id)));
+
+			if (!this._full_loading.has(key)) {
+				for (const id of unique_ids)
+					this._release_texture(id);
+				return;
+			}
+
+			// build per-chunk metadata and count alpha layers
+			let total_alpha_layers = 0;
+			const chunk_meta = new Array(tile.chunk_count);
+
+			for (let i = 0; i < tile.chunk_count; i++) {
+				const cx = tile.chunk_grid_pos[i * 2];
+				const cy = tile.chunk_grid_pos[i * 2 + 1];
+				const grid_idx = cx * 16 + cy;
+				const tex_chunk = tex_adt.texChunks[grid_idx];
+
+				if (!tex_chunk?.layers || tex_chunk.layers.length === 0) {
+					chunk_meta[i] = null;
+					continue;
+				}
+
+				const layer_count = Math.min(tex_chunk.layers.length, 8);
+				const alpha_offset = total_alpha_layers;
+				total_alpha_layers += Math.max(0, layer_count - 1);
+
+				// build texture slot mapping for this chunk
+				const slot_map = new Map();
+				const slot_ids = [];
+				const diffuse_slots = new Int32Array(8);
+				const height_slots = new Int32Array(8);
+				const layer_scales = new Float32Array(8).fill(1);
+				const height_scale_arr = new Float32Array(8);
+				const height_offset_arr = new Float32Array(8).fill(1);
+
+				for (let li = 0; li < layer_count; li++) {
+					const layer = tex_chunk.layers[li];
+					const did = diffuse_ids[layer.textureId];
+					const hid = (has_height && height_ids) ? height_ids[layer.textureId] : 0;
+					const effective_hid = hid > 0 ? hid : did;
+
+					if (did > 0 && !slot_map.has(did)) {
+						slot_map.set(did, slot_ids.length);
+						slot_ids.push(did);
+					}
+					diffuse_slots[li] = did > 0 ? slot_map.get(did) : 0;
+
+					if (has_height && effective_hid > 0 && !slot_map.has(effective_hid)) {
+						slot_map.set(effective_hid, slot_ids.length);
+						slot_ids.push(effective_hid);
+					}
+					height_slots[li] = (has_height && effective_hid > 0) ? slot_map.get(effective_hid) : diffuse_slots[li];
+
+					if (tex_params?.[layer.textureId]) {
+						const params = tex_params[layer.textureId];
+						layer_scales[li] = Math.pow(2, (params.flags & 0xF0) >> 4);
+
+						if (has_height) {
+							height_scale_arr[li] = params.height;
+							height_offset_arr[li] = params.offset;
+						}
+					}
+				}
+
+				chunk_meta[i] = {
+					layer_count,
+					alpha_offset,
+					chunk_x: cx,
+					chunk_y: cy,
+					slot_ids,
+					diffuse_slots,
+					height_slots,
+					layer_scales,
+					height_scales: height_scale_arr,
+					height_offsets: height_offset_arr
+				};
+			}
+
+			// extract alpha layer data for deferred GPU upload
+			const alpha_uploads = [];
+			if (total_alpha_layers > 0) {
+				for (let i = 0; i < tile.chunk_count; i++) {
+					const meta = chunk_meta[i];
+					if (!meta || meta.layer_count <= 1)
+						continue;
+
+					const grid_idx = meta.chunk_x * 16 + meta.chunk_y;
+					const alpha_layers = tex_adt.texChunks[grid_idx]?.alphaLayers;
+
+					for (let li = 1; li < meta.layer_count; li++)
+						alpha_uploads.push(alpha_layers?.[li] ? new Uint8Array(alpha_layers[li]) : null);
+				}
+			}
+
+			// collect textures needing GPU upload
+			const pending_uploads = [];
+			for (const id of unique_ids) {
+				const entry = this._texture_cache.get(id);
+				if (entry?.blp && !entry.texture)
+					pending_uploads.push(id);
+			}
+
+			this._full_upload_queue.push({
+				key,
+				pending_uploads,
+				upload_index: 0,
+				alpha_uploads,
+				total_alpha_layers,
+				chunk_meta,
+				texture_refs: unique_ids
+			});
+		} catch (e) {
+			this._full_loading.delete(key);
+		}
+	}
+
+	_unload_full_tile(tile) {
+		if (!tile.full)
+			return;
+
+		if (tile.full.alpha_tex)
+			this.gl.deleteTexture(tile.full.alpha_tex);
+
+		if (tile.full.texture_refs) {
+			for (const id of tile.full.texture_refs)
+				this._release_texture(id);
+		}
+
+		tile.full = null;
+	}
+
+	_dispose_all_full() {
+		for (const tile of this._tiles.values())
+			this._unload_full_tile(tile);
+
+		this._full_loading.clear();
+		this._full_load_queue.length = 0;
+
+		for (const job of this._full_upload_queue) {
+			for (const id of job.texture_refs)
+				this._release_texture(id);
+		}
+		this._full_upload_queue.length = 0;
+	}
+
+	async _cache_texture_data(file_data_id) {
+		const entry = this._texture_cache.get(file_data_id);
+		if (entry) {
+			if (entry.promise)
+				await entry.promise;
+
+			entry.ref_count++;
+			return;
+		}
+
+		const placeholder = { blp: null, texture: null, ref_count: 1, promise: null };
+		this._texture_cache.set(file_data_id, placeholder);
+
+		placeholder.promise = this._casc.getFile(file_data_id).then(blp_data => {
+			placeholder.blp = new BLPFile(blp_data);
+			placeholder.promise = null;
+		}).catch(() => {
+			placeholder.promise = null;
+		});
+
+		await placeholder.promise;
+	}
+
+	_upload_cached_texture(file_data_id) {
+		const entry = this._texture_cache.get(file_data_id);
+		if (!entry?.blp || entry.texture)
+			return false;
+
+		entry.texture = new GLTexture(this.ctx);
+		entry.texture.set_blp(entry.blp, { wrap_s: true, wrap_t: true });
+		entry.blp = null;
+		return true;
+	}
+
+	_process_full_uploads(budget = FULL_UPLOAD_BUDGET) {
+		while (budget > 0 && this._full_upload_queue.length > 0) {
+			const job = this._full_upload_queue[0];
+
+			if (!this._full_loading.has(job.key)) {
+				this._full_upload_queue.shift();
+				for (const id of job.texture_refs)
+					this._release_texture(id);
+				continue;
+			}
+
+			while (budget > 0 && job.upload_index < job.pending_uploads.length) {
+				const id = job.pending_uploads[job.upload_index];
+				job.upload_index++;
+
+				if (this._upload_cached_texture(id))
+					budget--;
+			}
+
+			if (job.upload_index < job.pending_uploads.length)
+				break;
+
+			this._finalize_full_upload(job);
+			this._full_upload_queue.shift();
+			budget--;
+		}
+	}
+
+	_finalize_full_upload(job) {
+		const tile = this._tiles.get(job.key);
+		if (!tile) {
+			for (const id of job.texture_refs)
+				this._release_texture(id);
+			this._full_loading.delete(job.key);
+			return;
+		}
+
+		let alpha_tex = null;
+		if (job.total_alpha_layers > 0) {
+			const gl = this.gl;
+			alpha_tex = gl.createTexture();
+			gl.bindTexture(gl.TEXTURE_2D_ARRAY, alpha_tex);
+			gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.R8, 64, 64, job.total_alpha_layers, 0, gl.RED, gl.UNSIGNED_BYTE, null);
+
+			for (let i = 0; i < job.alpha_uploads.length; i++) {
+				if (job.alpha_uploads[i])
+					gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, 64, 64, 1, gl.RED, gl.UNSIGNED_BYTE, job.alpha_uploads[i]);
+			}
+
+			gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+			gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+			gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+			gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+		}
+
+		tile.full = { alpha_tex, chunk_meta: job.chunk_meta, texture_refs: job.texture_refs };
+		this._full_loading.delete(job.key);
+	}
+
+	_release_texture(file_data_id) {
+		const entry = this._texture_cache.get(file_data_id);
+		if (!entry)
+			return;
+
+		entry.ref_count--;
+		if (entry.ref_count <= 0) {
+			if (entry.texture)
+				entry.texture.dispose();
+
+			this._texture_cache.delete(file_data_id);
+		}
+	}
+
+	render_full(view_matrix, projection_matrix) {
+		this._compute_frustum(view_matrix, projection_matrix);
+
+		const gl = this.gl;
+		const planes = this._frustum_planes;
+		let visible = 0;
+		const cam_tx = this._last_tx;
+		const cam_ty = this._last_ty;
+		const lod = this.full_lod_distance;
+		const has_height = (this._wdt?.flags & 0x80) === 0x80;
+
+		// pass 1: far tiles with tex0 fallback (batched)
+		if (this.minimap_shader.is_valid()) {
+			this.minimap_shader.use();
+			this.minimap_shader.set_uniform_mat4('u_view', false, view_matrix);
+			this.minimap_shader.set_uniform_mat4('u_projection', false, projection_matrix);
+			this.minimap_shader.set_uniform_1i('u_minimap', 0);
+			this.minimap_shader.set_uniform_3fv('u_light_dir', this.light_dir);
+			this.minimap_shader.set_uniform_3fv('u_sun_color', this.sun_color);
+			this.minimap_shader.set_uniform_1f('u_sun_intensity', this.sun_intensity);
+
+			for (const tile of this._tiles.values()) {
+				const in_lod = Math.abs(tile.x - cam_tx) <= lod && Math.abs(tile.y - cam_ty) <= lod;
+				if (in_lod && tile.full)
+					continue;
+
+				if (!tile.adt_tex || !this._is_tile_visible(tile, planes))
+					continue;
+
+				tile.adt_tex.bind(0);
+				tile.vao.bind();
+				gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tile.vao.ebo);
+				visible += this._draw_tile_batched(tile, planes, gl.TRIANGLES, false);
+			}
+		}
+
+		// pass 2: near tiles with full per-chunk rendering
+		const shader = has_height ? this.full_shader : this.full_legacy_shader;
+		if (!shader?.is_valid())
+			return visible;
+
+		shader.use();
+		shader.set_uniform_mat4('u_view', false, view_matrix);
+		shader.set_uniform_mat4('u_projection', false, projection_matrix);
+		shader.set_uniform_3fv('u_light_dir', this.light_dir);
+		shader.set_uniform_3fv('u_sun_color', this.sun_color);
+		shader.set_uniform_1f('u_sun_intensity', this.sun_intensity);
+
+		for (let i = 0; i < 8; i++)
+			shader.set_uniform_1i('u_tex' + i, i);
+		shader.set_uniform_1i('u_alpha_maps', 8);
+
+		for (const tile of this._tiles.values()) {
+			if (!tile.full || !this._is_tile_visible(tile, planes))
+				continue;
+
+			const in_lod = Math.abs(tile.x - cam_tx) <= lod && Math.abs(tile.y - cam_ty) <= lod;
+			if (!in_lod)
+				continue;
+
+			if (tile.full.alpha_tex)
+				this.ctx.bind_texture(8, tile.full.alpha_tex, gl.TEXTURE_2D_ARRAY);
+
+			tile.vao.bind();
+			gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tile.vao.ebo);
+
+			for (let i = 0; i < tile.chunk_count; i++) {
+				const meta = tile.full.chunk_meta[i];
+				if (!meta)
+					continue;
+
+				const bo = i * 6;
+				if (!this._is_aabb_visible(tile.chunk_bounds, bo, planes))
+					continue;
+
+				// bind texture slots for this chunk
+				for (let s = 0; s < meta.slot_ids.length; s++) {
+					const entry = this._texture_cache.get(meta.slot_ids[s]);
+					if (entry)
+						entry.texture.bind(s);
+				}
+
+				shader.set_uniform_1i('u_layer_count', meta.layer_count);
+				shader.set_uniform_1i('u_alpha_offset', meta.alpha_offset);
+				shader.set_uniform_2f('u_chunk_offset', meta.chunk_y, meta.chunk_x);
+				shader.set_uniform_1iv('u_diffuse_slot', meta.diffuse_slots);
+				shader.set_uniform_1fv('u_layer_scale', meta.layer_scales);
+
+				if (has_height) {
+					shader.set_uniform_1iv('u_height_slot', meta.height_slots);
+					shader.set_uniform_1fv('u_height_scale', meta.height_scales);
+					shader.set_uniform_1fv('u_height_offset', meta.height_offsets);
+				}
+
+				const dw = i * 2;
+				gl.drawElements(gl.TRIANGLES, tile.chunk_draw[dw + 1], gl.UNSIGNED_SHORT, tile.chunk_draw[dw] * 2);
+				visible++;
+			}
+		}
+
+		return visible;
 	}
 
 	render(view_matrix, projection_matrix, terrain_color) {
@@ -1097,6 +1603,14 @@ class TerrainRenderer {
 		this._loading.clear();
 		this._load_queue.length = 0;
 		this._upload_queue.length = 0;
+		this._full_loading.clear();
+		this._full_load_queue.length = 0;
+
+		for (const job of this._full_upload_queue) {
+			for (const id of job.texture_refs)
+				this._release_texture(id);
+		}
+		this._full_upload_queue.length = 0;
 
 		for (const tile of this._tiles.values()) {
 			if (tile.minimap_tex)
@@ -1105,10 +1619,17 @@ class TerrainRenderer {
 			if (tile.adt_tex)
 				tile.adt_tex.dispose();
 
+			this._unload_full_tile(tile);
 			tile.vao.dispose();
 		}
 
 		this._tiles.clear();
+
+		for (const entry of this._texture_cache.values()) {
+			if (entry.texture)
+				entry.texture.dispose();
+		}
+		this._texture_cache.clear();
 
 		for (const vao of this._vao_pool)
 			vao.dispose();
@@ -1125,22 +1646,13 @@ class TerrainRenderer {
 			this._grid_vao = null;
 		}
 
-		if (this.shader) {
-			Shaders.unregister(this.shader);
-			this.shader.dispose();
-			this.shader = null;
-		}
-
-		if (this.wire_shader) {
-			Shaders.unregister(this.wire_shader);
-			this.wire_shader.dispose();
-			this.wire_shader = null;
-		}
-
-		if (this.minimap_shader) {
-			Shaders.unregister(this.minimap_shader);
-			this.minimap_shader.dispose();
-			this.minimap_shader = null;
+		const shaders = ['shader', 'wire_shader', 'minimap_shader', 'full_shader', 'full_legacy_shader'];
+		for (const name of shaders) {
+			if (this[name]) {
+				Shaders.unregister(this[name]);
+				this[name].dispose();
+				this[name] = null;
+			}
 		}
 	}
 }
