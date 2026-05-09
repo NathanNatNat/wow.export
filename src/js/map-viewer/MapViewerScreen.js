@@ -41,7 +41,7 @@ const SECTIONS = [
 		label: 'Terrain',
 		controls: [
 			{ type: 'dropdown', data_key: 'texture_mode', label: 'Texture Mode', options: ['Flat', 'Wireframe', 'Minimap', 'ADT Tex', 'Full'] },
-			{ type: 'slider', data_key: 'full_lod_distance', label: 'Tex LoD Distance', min: 1, max: 5, step: 1, visible_mode: 'Full' },
+			{ type: 'slider', data_key: 'full_lod_distance', label: 'Tex LoD (chunks)', min: 1, max: 16, step: 1, visible_mode: 'Full' },
 			{ type: 'color', key: 'mapViewerTerrainColor', label: 'Terrain Colour', visible_mode: 'Flat' },
 			{ type: 'color', key: 'mapViewerWireframeColor', label: 'Wireframe Colour', visible_mode: 'Wireframe' },
 			{ type: 'checkbox', key: 'mapViewerWireframeOcclusion', label: 'Depth Occlusion', visible_mode: 'Wireframe' },
@@ -152,7 +152,7 @@ module.exports = {
 			open_section: null,
 			sections: SECTIONS,
 			texture_mode: 'Flat',
-			full_lod_distance: 1,
+			full_lod_distance: 12,
 			show_adt_bounds: false
 		};
 	},
@@ -216,7 +216,7 @@ module.exports = {
 
 		full_lod_distance(val) {
 			if (this._terrain)
-				this._terrain.full_lod_distance = val;
+				this._terrain.set_full_lod_distance(val);
 		}
 	},
 

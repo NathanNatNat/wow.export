@@ -25,7 +25,7 @@ const ADT_TEX_ATLAS_RES = ADT_TEX_CHUNK_RES * 16;
 
 const MAX_FULL_CONCURRENT_LOADS = 2;
 const FULL_UPLOAD_BUDGET = 4;
-const DEFAULT_FULL_LOD_DISTANCE = 1;
+const DEFAULT_FULL_LOD_DISTANCE = 12;
 
 // 256 chunks x 145 verts x 36 bytes (pos3f + normal3f + uv2f + color4ub)
 const MAX_TILE_VERTEX_BYTES = 256 * 145 * 36;
@@ -60,6 +60,8 @@ class TerrainRenderer {
 
 		this._last_tx = NaN;
 		this._last_ty = NaN;
+		this._last_cx = NaN;
+		this._last_cy = NaN;
 
 		this.light_dir = new Float32Array([-0.4394, 0.8192, 0.3687]);
 		this.sun_color = new Float32Array([1.0, 0.95, 0.85]);
@@ -107,6 +109,8 @@ class TerrainRenderer {
 		// force tile re-evaluation on next frame
 		this._last_tx = NaN;
 		this._last_ty = NaN;
+		this._last_cx = NaN;
+		this._last_cy = NaN;
 		this._grid_dirty = true;
 	}
 
@@ -179,8 +183,16 @@ class TerrainRenderer {
 			this._grid_dirty = true;
 		}
 
-		if (this.texture_mode === 'Full')
-			this._update_full_textures(tx, ty);
+		if (this.texture_mode === 'Full') {
+			const cx = Math.floor((32 * TILE_SIZE - camera_pos[2]) / CHUNK_SIZE);
+			const cy = Math.floor((32 * TILE_SIZE - camera_pos[0]) / CHUNK_SIZE);
+
+			if (cx !== this._last_cx || cy !== this._last_cy) {
+				this._last_cx = cx;
+				this._last_cy = cy;
+				this._update_full_textures(cx, cy);
+			}
+		}
 
 		this._process_full_uploads();
 		this._pump_load_queue();
@@ -669,41 +681,66 @@ class TerrainRenderer {
 		};
 	}
 
+	set_full_lod_distance(val) {
+		this.full_lod_distance = val;
+		this._last_cx = NaN;
+		this._last_cy = NaN;
+	}
+
 	set_texture_mode(mode) {
 		const prev = this.texture_mode;
 		this.texture_mode = mode;
 
 		if (prev === 'Full' && mode !== 'Full')
 			this._dispose_all_full();
+
+		// force chunk-level re-evaluation on next frame
+		if (mode === 'Full') {
+			this._last_cx = NaN;
+			this._last_cy = NaN;
+		}
 	}
 
-	_update_full_textures(cam_tx, cam_ty) {
+	_tile_overlaps_chunk_lod(tile, cam_cx, cam_cy, lod) {
+		const tile_min_cx = tile.x * 16;
+		const tile_min_cy = tile.y * 16;
+		const tile_max_cx = tile_min_cx + 15;
+		const tile_max_cy = tile_min_cy + 15;
+
+		return tile_max_cx >= cam_cx - lod && tile_min_cx <= cam_cx + lod
+			&& tile_max_cy >= cam_cy - lod && tile_min_cy <= cam_cy + lod;
+	}
+
+	_update_full_textures(cam_cx, cam_cy) {
 		const lod = this.full_lod_distance;
 
-		// unload tiles outside LoD range
+		// unload tiles fully outside chunk LoD range
 		for (const [key, tile] of this._tiles) {
 			if (!tile.full)
 				continue;
 
-			if (Math.abs(tile.x - cam_tx) > lod || Math.abs(tile.y - cam_ty) > lod)
+			if (!this._tile_overlaps_chunk_lod(tile, cam_cx, cam_cy, lod))
 				this._unload_full_tile(tile);
 		}
 
 		// cancel in-flight full loads outside range
 		for (const key of this._full_loading) {
 			const tile = this._tiles.get(key);
-			if (!tile || Math.abs(tile.x - cam_tx) > lod || Math.abs(tile.y - cam_ty) > lod)
+			if (!tile || !this._tile_overlaps_chunk_lod(tile, cam_cx, cam_cy, lod))
 				this._full_loading.delete(key);
 		}
 
-		// queue tiles in LoD range that need full textures
+		// queue tiles overlapping chunk LoD range that need full textures
 		const to_load = [];
 		for (const [key, tile] of this._tiles) {
 			if (tile.full || this._full_loading.has(key))
 				continue;
 
-			if (Math.abs(tile.x - cam_tx) <= lod && Math.abs(tile.y - cam_ty) <= lod)
-				to_load.push({ key, dist: (tile.x - cam_tx) ** 2 + (tile.y - cam_ty) ** 2 });
+			if (this._tile_overlaps_chunk_lod(tile, cam_cx, cam_cy, lod)) {
+				const tile_cx = tile.x * 16 + 8;
+				const tile_cy = tile.y * 16 + 8;
+				to_load.push({ key, dist: (tile_cx - cam_cx) ** 2 + (tile_cy - cam_cy) ** 2 });
+			}
 		}
 
 		to_load.sort((a, b) => a.dist - b.dist);
@@ -1034,12 +1071,12 @@ class TerrainRenderer {
 		const gl = this.gl;
 		const planes = this._frustum_planes;
 		let visible = 0;
-		const cam_tx = this._last_tx;
-		const cam_ty = this._last_ty;
+		const cam_cx = this._last_cx;
+		const cam_cy = this._last_cy;
 		const lod = this.full_lod_distance;
 		const has_height = (this._wdt?.flags & 0x80) === 0x80;
 
-		// pass 1: far tiles with tex0 fallback (batched)
+		// pass 1: tex0 fallback for tiles without full data + out-of-range chunks on full tiles
 		if (this.minimap_shader.is_valid()) {
 			this.minimap_shader.use();
 			this.minimap_shader.set_uniform_mat4('u_view', false, view_matrix);
@@ -1050,21 +1087,61 @@ class TerrainRenderer {
 			this.minimap_shader.set_uniform_1f('u_sun_intensity', this.sun_intensity);
 
 			for (const tile of this._tiles.values()) {
-				const in_lod = Math.abs(tile.x - cam_tx) <= lod && Math.abs(tile.y - cam_ty) <= lod;
-				if (in_lod && tile.full)
-					continue;
-
 				if (!tile.adt_tex || !this._is_tile_visible(tile, planes))
 					continue;
 
+				if (!tile.full) {
+					// no full data, draw entire tile with tex0
+					tile.adt_tex.bind(0);
+					tile.vao.bind();
+					gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tile.vao.ebo);
+					visible += this._draw_tile_batched(tile, planes, gl.TRIANGLES, false);
+					continue;
+				}
+
+				// tile has full data: draw only out-of-range chunks with tex0
 				tile.adt_tex.bind(0);
 				tile.vao.bind();
 				gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, tile.vao.ebo);
-				visible += this._draw_tile_batched(tile, planes, gl.TRIANGLES, false);
+
+				let batch_start = -1;
+				let batch_count = 0;
+
+				for (let i = 0; i < tile.chunk_count; i++) {
+					const bo = i * 6;
+					const dw = i * 2;
+
+					const chunk_cx = tile.x * 16 + tile.chunk_grid_pos[i * 2];
+					const chunk_cy = tile.y * 16 + tile.chunk_grid_pos[i * 2 + 1];
+					const in_lod = Math.abs(chunk_cx - cam_cx) <= lod && Math.abs(chunk_cy - cam_cy) <= lod;
+
+					if (!in_lod && this._is_aabb_visible(tile.chunk_bounds, bo, planes)) {
+						const offset = tile.chunk_draw[dw];
+						const idx_count = tile.chunk_draw[dw + 1];
+
+						if (batch_start === -1) {
+							batch_start = offset;
+							batch_count = idx_count;
+						} else if (offset === batch_start + batch_count) {
+							batch_count += idx_count;
+						} else {
+							gl.drawElements(gl.TRIANGLES, batch_count, gl.UNSIGNED_SHORT, batch_start * 2);
+							batch_start = offset;
+							batch_count = idx_count;
+						}
+						visible++;
+					} else if (batch_start !== -1) {
+						gl.drawElements(gl.TRIANGLES, batch_count, gl.UNSIGNED_SHORT, batch_start * 2);
+						batch_start = -1;
+					}
+				}
+
+				if (batch_start !== -1)
+					gl.drawElements(gl.TRIANGLES, batch_count, gl.UNSIGNED_SHORT, batch_start * 2);
 			}
 		}
 
-		// pass 2: near tiles with full per-chunk rendering
+		// pass 2: full textured rendering for in-range chunks
 		const shader = has_height ? this.full_shader : this.full_legacy_shader;
 		if (!shader?.is_valid())
 			return visible;
@@ -1084,10 +1161,6 @@ class TerrainRenderer {
 			if (!tile.full || !this._is_tile_visible(tile, planes))
 				continue;
 
-			const in_lod = Math.abs(tile.x - cam_tx) <= lod && Math.abs(tile.y - cam_ty) <= lod;
-			if (!in_lod)
-				continue;
-
 			if (tile.full.alpha_tex)
 				this.ctx.bind_texture(8, tile.full.alpha_tex, gl.TEXTURE_2D_ARRAY);
 
@@ -1099,11 +1172,15 @@ class TerrainRenderer {
 				if (!meta)
 					continue;
 
+				const chunk_cx = tile.x * 16 + meta.chunk_x;
+				const chunk_cy = tile.y * 16 + meta.chunk_y;
+				if (Math.abs(chunk_cx - cam_cx) > lod || Math.abs(chunk_cy - cam_cy) > lod)
+					continue;
+
 				const bo = i * 6;
 				if (!this._is_aabb_visible(tile.chunk_bounds, bo, planes))
 					continue;
 
-				// bind texture slots for this chunk
 				for (let s = 0; s < meta.slot_ids.length; s++) {
 					const entry = this._texture_cache.get(meta.slot_ids[s]);
 					if (entry)
