@@ -7,6 +7,7 @@ const VertexArray = require('../3D/gl/VertexArray');
 const GLTexture = require('../3D/gl/GLTexture');
 const BLPFile = require('../casc/blp');
 const TEXLoader = require('../3D/loaders/TEXLoader');
+const listfile = require('../casc/listfile');
 
 const MAP_SIZE = constants.GAME.MAP_SIZE;
 const TILE_SIZE = constants.GAME.TILE_SIZE;
@@ -132,8 +133,7 @@ class TerrainRenderer {
 
 		this._wdt = wdt;
 
-		if (!wdt.entries)
-			throw new Error('WDT has no tile entries');
+		const has_maid = !!wdt.entries;
 
 		let min_tx = MAP_SIZE, min_ty = MAP_SIZE, max_tx = 0, max_ty = 0;
 
@@ -143,12 +143,26 @@ class TerrainRenderer {
 				if (!wdt.tiles[idx])
 					continue;
 
-				const entry = wdt.entries[idx];
-				if (!entry || !entry.rootADT)
-					continue;
+				let root_id, tex0_id;
+
+				if (has_maid) {
+					const entry = wdt.entries[idx];
+					if (!entry || !entry.rootADT)
+						continue;
+
+					root_id = entry.rootADT;
+					tex0_id = entry.tex0ADT;
+				} else {
+					const tile_prefix = prefix + '_' + x + '_' + y;
+					root_id = listfile.getByFilename(tile_prefix + '.adt');
+					tex0_id = listfile.getByFilename(tile_prefix + '_tex0.adt');
+
+					if (!root_id)
+						continue;
+				}
 
 				const key = x + '_' + y;
-				this._tile_info.set(key, { root_id: entry.rootADT, tex0_id: entry.tex0ADT, x, y });
+				this._tile_info.set(key, { root_id, tex0_id, x, y });
 
 				if (x < min_tx) min_tx = x;
 				if (y < min_ty) min_ty = y;
