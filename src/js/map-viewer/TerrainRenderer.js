@@ -76,6 +76,10 @@ class TerrainRenderer {
 		this._grid_vertex_count = 0;
 		this._grid_dirty = true;
 
+		this._chunk_grid_vao = null;
+		this._chunk_grid_vertex_count = 0;
+		this._chunk_grid_dirty = true;
+
 		this._texture_cache = new Map();
 		this._full_loading = new Set();
 		this._full_load_queue = [];
@@ -114,6 +118,7 @@ class TerrainRenderer {
 		this._last_cx = NaN;
 		this._last_cy = NaN;
 		this._grid_dirty = true;
+		this._chunk_grid_dirty = true;
 	}
 
 	async init(map_dir) {
@@ -183,6 +188,7 @@ class TerrainRenderer {
 			this._last_ty = ty;
 			this._update_needed_tiles(tx, ty);
 			this._grid_dirty = true;
+			this._chunk_grid_dirty = true;
 		}
 
 		if (this.texture_mode === 'Full') {
@@ -402,6 +408,7 @@ class TerrainRenderer {
 			this._tiles.set(key, tile);
 			this._chunk_count += tile.chunk_count;
 			this._grid_dirty = true;
+			this._chunk_grid_dirty = true;
 		}
 	}
 
@@ -1782,6 +1789,86 @@ class TerrainRenderer {
 		return vi + 2;
 	}
 
+	render_chunk_grid(view_matrix, projection_matrix, grid_color) {
+		if (!this.wire_shader.is_valid())
+			return;
+
+		if (this._chunk_grid_dirty)
+			this._rebuild_chunk_grid();
+
+		if (this._chunk_grid_vertex_count === 0)
+			return;
+
+		this.wire_shader.use();
+		this.wire_shader.set_uniform_mat4('u_view', false, view_matrix);
+		this.wire_shader.set_uniform_mat4('u_projection', false, projection_matrix);
+		this.wire_shader.set_uniform_3fv('u_terrain_color', grid_color);
+
+		this._chunk_grid_vao.bind();
+		this.gl.drawArrays(this.gl.LINES, 0, this._chunk_grid_vertex_count);
+	}
+
+	_rebuild_chunk_grid() {
+		this._chunk_grid_dirty = false;
+
+		let total_verts = 0;
+		for (const tile of this._tiles.values()) {
+			if (tile.height_data)
+				total_verts += 30 * 128 * 2;
+		}
+
+		if (total_verts === 0) {
+			this._chunk_grid_vertex_count = 0;
+			return;
+		}
+
+		const positions = new Float32Array(total_verts * 3);
+		let vi = 0;
+
+		for (const tile of this._tiles.values()) {
+			if (!tile.height_data)
+				continue;
+
+			const grid = tile.height_data.grid;
+			const ox = (32 - tile.y) * TILE_SIZE;
+			const oz = (32 - tile.x) * TILE_SIZE;
+
+			// horizontal chunk boundaries (15 internal rows)
+			for (let cr = 1; cr < 16; cr++) {
+				const row_offset = cr * 8 * 129;
+				const z = oz - cr * CHUNK_SIZE;
+				vi = this._grid_write_h_edge(positions, vi, grid, row_offset, ox, z);
+			}
+
+			// vertical chunk boundaries (15 internal columns)
+			for (let cc = 1; cc < 16; cc++) {
+				const col_offset = cc * 8;
+				const x = ox - cc * CHUNK_SIZE;
+				vi = this._grid_write_v_edge(positions, vi, grid, col_offset, x, oz);
+			}
+		}
+
+		this._chunk_grid_vertex_count = vi;
+
+		if (vi === 0)
+			return;
+
+		const gl = this.gl;
+		if (!this._chunk_grid_vao) {
+			this._chunk_grid_vao = new VertexArray(this.ctx);
+			this._chunk_grid_vao.bind();
+			this._chunk_grid_vao.vbo = gl.createBuffer();
+			gl.bindBuffer(gl.ARRAY_BUFFER, this._chunk_grid_vao.vbo);
+			gl.enableVertexAttribArray(0);
+			gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
+		} else {
+			this._chunk_grid_vao.bind();
+			gl.bindBuffer(gl.ARRAY_BUFFER, this._chunk_grid_vao.vbo);
+		}
+
+		gl.bufferData(gl.ARRAY_BUFFER, positions.subarray(0, vi * 3), gl.DYNAMIC_DRAW);
+	}
+
 	dispose() {
 		this._disposed = true;
 		this._loading.clear();
@@ -1830,6 +1917,11 @@ class TerrainRenderer {
 		if (this._grid_vao) {
 			this._grid_vao.dispose();
 			this._grid_vao = null;
+		}
+
+		if (this._chunk_grid_vao) {
+			this._chunk_grid_vao.dispose();
+			this._chunk_grid_vao = null;
 		}
 
 		const shaders = ['shader', 'wire_shader', 'minimap_shader', 'full_shader', 'full_legacy_shader'];

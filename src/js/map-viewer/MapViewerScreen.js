@@ -8,6 +8,7 @@ const Minimap = require('./Minimap');
 
 const TILE_SIZE = constants.GAME.TILE_SIZE;
 const GRID_COLOR = new Float32Array([0x57 / 255, 0xAF / 255, 0xE2 / 255]);
+const CHUNK_GRID_COLOR = new Float32Array([0x3D / 255, 0x7A / 255, 0x9E / 255]);
 
 const SECTIONS = [
 	{
@@ -46,7 +47,8 @@ const SECTIONS = [
 			{ type: 'color', key: 'mapViewerWireframeColor', label: 'Wireframe Colour', visible_mode: 'Wireframe' },
 			{ type: 'checkbox', key: 'mapViewerWireframeOcclusion', label: 'Depth Occlusion', visible_mode: 'Wireframe' },
 			{ type: 'checkbox', data_key: 'render_holes', label: 'Render Holes' },
-			{ type: 'checkbox', data_key: 'show_adt_bounds', label: 'Show ADT Region Bounds' }
+			{ type: 'checkbox', data_key: 'show_adt_bounds', label: 'Show Tile Bounds' },
+			{ type: 'checkbox', data_key: 'show_chunk_bounds', label: 'Show Chunk Bounds' }
 		]
 	},
 	{
@@ -155,7 +157,8 @@ module.exports = {
 			texture_mode: 'Flat',
 			full_lod_distance: 12,
 			render_holes: true,
-			show_adt_bounds: false
+			show_adt_bounds: false,
+			show_chunk_bounds: false
 		};
 	},
 
@@ -358,6 +361,9 @@ module.exports = {
 					} else {
 						visible = this._terrain.render(this._camera.view_matrix, this._camera.projection_matrix, this._terrain_color);
 					}
+					if (this.show_chunk_bounds)
+						this._terrain.render_chunk_grid(this._camera.view_matrix, this._camera.projection_matrix, CHUNK_GRID_COLOR);
+
 					if (this.show_adt_bounds)
 						this._terrain.render_grid(this._camera.view_matrix, this._camera.projection_matrix, GRID_COLOR);
 
