@@ -302,6 +302,7 @@ const makeNewView = () => {
 		menuButtonMapExport: [
 			{ label: 'Export OBJ', value: 'OBJ' },
 			{ label: 'Export PNG', value: 'PNG' },
+			{ label: 'Export Minimap Tiles', value: 'MINIMAP' },
 			{ label: 'Export Raw', value: 'RAW' },
 			{ label: 'Export Heightmaps', value: 'HEIGHTMAPS' }
 		],

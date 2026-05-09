@@ -780,6 +780,8 @@ module.exports = {
 				await this.export_selected_map_as_png();
 			else if (format === 'RAW')
 				await this.export_selected_map_as_raw();
+			else if (format === 'MINIMAP')
+				await this.export_selected_minimap_tiles();
 			else if (format === 'HEIGHTMAPS')
 				await this.export_selected_map_as_heightmaps();
 		},
@@ -942,6 +944,49 @@ module.exports = {
 				log.write('PNG export failed: %s', e.message);
 			}
 
+			helper.finish();
+		},
+
+		async export_selected_minimap_tiles() {
+			const export_tiles = this.$core.view.mapViewerSelection;
+
+			if (export_tiles.length === 0)
+				return this.$core.setToast('error', 'You haven\'t selected any tiles; hold shift and click on a map tile to select it.', null, -1);
+
+			const helper = new ExportHelper(export_tiles.length, 'tile');
+			helper.start();
+
+			const dir = ExportHelper.getExportPath(path.join('maps', selected_map_dir, 'minimap'));
+			const export_paths = this.$core.openLastExportStream();
+
+			for (const index of export_tiles) {
+				if (helper.isCancelled())
+					break;
+
+				const x = Math.floor(index / constants.GAME.MAP_SIZE);
+				const y = index % constants.GAME.MAP_SIZE;
+				const tile_name = util.format('map%s_%s', x.toString().padStart(2, '0'), y.toString().padStart(2, '0'));
+				const mark_path = path.join('maps', selected_map_dir, 'minimap', tile_name);
+
+				try {
+					const tile_data = await load_map_tile(x, y, 512);
+					if (!tile_data)
+						throw new Error('minimap tile not available');
+
+					const png = new PNGWriter(tile_data.width, tile_data.height);
+					png.getPixelData().set(tile_data.data);
+
+					const out_path = path.join(dir, tile_name + '.png');
+					await png.write(out_path);
+
+					await export_paths?.writeLine('png:' + out_path);
+					helper.mark(mark_path, true);
+				} catch (e) {
+					helper.mark(mark_path, false, e.message, e.stack);
+				}
+			}
+
+			export_paths?.close();
 			helper.finish();
 		},
 
