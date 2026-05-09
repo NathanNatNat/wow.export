@@ -26,6 +26,7 @@ const ADT_TEX_ATLAS_RES = ADT_TEX_CHUNK_RES * 16;
 const MAX_FULL_CONCURRENT_LOADS = 2;
 const FULL_UPLOAD_BUDGET = 4;
 const DEFAULT_FULL_LOD_DISTANCE = 12;
+const ALPHA_UPLOAD_BATCH = 32;
 
 // 256 chunks x 145 verts x 36 bytes (pos3f + normal3f + uv2f + color4ub)
 const MAX_TILE_VERTEX_BYTES = 256 * 145 * 36;
@@ -968,19 +969,21 @@ class TerrainRenderer {
 				}
 			}
 
-			// collect textures needing GPU upload
-			const pending_uploads = [];
+			// collect textures needing parse and/or GPU upload
+			const pending_textures = [];
 			for (const id of unique_ids) {
 				const entry = this._texture_cache.get(id);
-				if (entry?.blp && !entry.texture)
-					pending_uploads.push(id);
+				if (entry && !entry.texture)
+					pending_textures.push(id);
 			}
 
 			this._full_upload_queue.push({
 				key,
-				pending_uploads,
-				upload_index: 0,
+				pending_textures,
+				texture_index: 0,
 				alpha_uploads,
+				alpha_upload_index: 0,
+				alpha_tex: null,
 				total_alpha_layers,
 				chunk_meta,
 				texture_refs: unique_ids
@@ -1013,6 +1016,8 @@ class TerrainRenderer {
 		this._full_load_queue.length = 0;
 
 		for (const job of this._full_upload_queue) {
+			if (job.alpha_tex)
+				this.gl.deleteTexture(job.alpha_tex);
 			for (const id of job.texture_refs)
 				this._release_texture(id);
 		}
@@ -1029,17 +1034,27 @@ class TerrainRenderer {
 			return;
 		}
 
-		const placeholder = { blp: null, texture: null, ref_count: 1, promise: null };
+		const placeholder = { raw_data: null, blp: null, texture: null, ref_count: 1, promise: null };
 		this._texture_cache.set(file_data_id, placeholder);
 
-		placeholder.promise = this._casc.getFile(file_data_id).then(blp_data => {
-			placeholder.blp = new BLPFile(blp_data);
+		placeholder.promise = this._casc.getFile(file_data_id).then(data => {
+			placeholder.raw_data = data;
 			placeholder.promise = null;
 		}).catch(() => {
 			placeholder.promise = null;
 		});
 
 		await placeholder.promise;
+	}
+
+	_parse_cached_texture(file_data_id) {
+		const entry = this._texture_cache.get(file_data_id);
+		if (!entry?.raw_data || entry.blp)
+			return false;
+
+		entry.blp = new BLPFile(entry.raw_data);
+		entry.raw_data = null;
+		return true;
 	}
 
 	_upload_cached_texture(file_data_id) {
@@ -1059,21 +1074,66 @@ class TerrainRenderer {
 
 			if (!this._full_loading.has(job.key)) {
 				this._full_upload_queue.shift();
+				if (job.alpha_tex)
+					this.gl.deleteTexture(job.alpha_tex);
 				for (const id of job.texture_refs)
 					this._release_texture(id);
 				continue;
 			}
 
-			while (budget > 0 && job.upload_index < job.pending_uploads.length) {
-				const id = job.pending_uploads[job.upload_index];
-				job.upload_index++;
+			// phase 1: parse BLPs from raw data, then upload to GPU
+			while (budget > 0 && job.texture_index < job.pending_textures.length) {
+				const id = job.pending_textures[job.texture_index];
+
+				if (this._parse_cached_texture(id)) {
+					budget--;
+					continue;
+				}
 
 				if (this._upload_cached_texture(id))
 					budget--;
+
+				job.texture_index++;
 			}
 
-			if (job.upload_index < job.pending_uploads.length)
+			if (job.texture_index < job.pending_textures.length)
 				break;
+
+			// phase 2: allocate and upload alpha layers
+			if (job.total_alpha_layers > 0) {
+				const gl = this.gl;
+
+				if (!job.alpha_tex) {
+					job.alpha_tex = gl.createTexture();
+					gl.bindTexture(gl.TEXTURE_2D_ARRAY, job.alpha_tex);
+					gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.R8, 64, 64, job.total_alpha_layers, 0, gl.RED, gl.UNSIGNED_BYTE, null);
+					gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+					gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+					gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+					gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+					budget--;
+
+					if (budget <= 0)
+						break;
+				}
+
+				gl.bindTexture(gl.TEXTURE_2D_ARRAY, job.alpha_tex);
+
+				while (budget > 0 && job.alpha_upload_index < job.alpha_uploads.length) {
+					const batch_end = Math.min(job.alpha_upload_index + ALPHA_UPLOAD_BATCH, job.alpha_uploads.length);
+
+					for (let i = job.alpha_upload_index; i < batch_end; i++) {
+						if (job.alpha_uploads[i])
+							gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, 64, 64, 1, gl.RED, gl.UNSIGNED_BYTE, job.alpha_uploads[i]);
+					}
+
+					job.alpha_upload_index = batch_end;
+					budget--;
+				}
+
+				if (job.alpha_upload_index < job.alpha_uploads.length)
+					break;
+			}
 
 			this._finalize_full_upload(job);
 			this._full_upload_queue.shift();
@@ -1084,31 +1144,15 @@ class TerrainRenderer {
 	_finalize_full_upload(job) {
 		const tile = this._tiles.get(job.key);
 		if (!tile) {
+			if (job.alpha_tex)
+				this.gl.deleteTexture(job.alpha_tex);
 			for (const id of job.texture_refs)
 				this._release_texture(id);
 			this._full_loading.delete(job.key);
 			return;
 		}
 
-		let alpha_tex = null;
-		if (job.total_alpha_layers > 0) {
-			const gl = this.gl;
-			alpha_tex = gl.createTexture();
-			gl.bindTexture(gl.TEXTURE_2D_ARRAY, alpha_tex);
-			gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.R8, 64, 64, job.total_alpha_layers, 0, gl.RED, gl.UNSIGNED_BYTE, null);
-
-			for (let i = 0; i < job.alpha_uploads.length; i++) {
-				if (job.alpha_uploads[i])
-					gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, 64, 64, 1, gl.RED, gl.UNSIGNED_BYTE, job.alpha_uploads[i]);
-			}
-
-			gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-			gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-			gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-			gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-		}
-
-		tile.full = { alpha_tex, chunk_meta: job.chunk_meta, texture_refs: job.texture_refs };
+		tile.full = { alpha_tex: job.alpha_tex, chunk_meta: job.chunk_meta, texture_refs: job.texture_refs };
 		this._full_loading.delete(job.key);
 	}
 
@@ -1747,6 +1791,8 @@ class TerrainRenderer {
 		this._full_load_queue.length = 0;
 
 		for (const job of this._full_upload_queue) {
+			if (job.alpha_tex)
+				this.gl.deleteTexture(job.alpha_tex);
 			for (const id of job.texture_refs)
 				this._release_texture(id);
 		}
