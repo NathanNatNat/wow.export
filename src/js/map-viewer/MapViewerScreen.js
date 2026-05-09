@@ -13,7 +13,8 @@ const SECTIONS = [
 		id: 'interface',
 		label: 'Interface',
 		controls: [
-			{ type: 'checkbox', key: 'mapViewerShowStats', label: 'Show Technical Stats' }
+			{ type: 'checkbox', key: 'mapViewerShowStats', label: 'Show Technical Stats' },
+			{ type: 'checkbox', key: 'mapViewerShowMinimap', label: 'Show Minimap' }
 		]
 	},
 	{
@@ -131,7 +132,7 @@ module.exports = {
 					</div>
 				</div>
 			</div>
-			<div ref="minimap_container" class="mv-minimap-container"></div>
+			<div v-show="config.mapViewerShowMinimap" ref="minimap_container" class="mv-minimap-container"></div>
 			<div class="mv-shortcuts">
 				<span class="mv-shortcut"><kbd>Esc</kbd> Exit Map</span>
 				<span class="mv-shortcut"><kbd>Alt+Z</kbd> Hide UI</span>
@@ -194,6 +195,13 @@ module.exports = {
 		'config.mapViewerSunColor'(val) {
 			if (this._terrain)
 				this._terrain.sun_color = hex_to_rgb(val);
+		},
+
+		'config.mapViewerShowMinimap'(val) {
+			if (val)
+				this._init_minimap();
+			else
+				this._dispose_minimap();
 		}
 	},
 
@@ -333,7 +341,7 @@ module.exports = {
 					this.coord_text = 'X: ' + cam[0].toFixed(1) + ' Y: ' + cam[2].toFixed(1) + ' Z: ' + cam[1].toFixed(1) + ' [' + adt_x + ', ' + adt_y + ']';
 
 					// update minimap
-					if (this._minimap) {
+					if (this._minimap && core.view.config.mapViewerShowMinimap) {
 						this._minimap.set_loaded_tiles(this._terrain.loaded_tiles);
 						this._minimap.set_camera(cam[0], cam[2]);
 						this._minimap.draw();
@@ -406,7 +414,7 @@ module.exports = {
 		},
 
 		_init_minimap() {
-			if (!this.$refs.minimap_container || !this._terrain)
+			if (!this.$refs.minimap_container || !this._terrain || !core.view.config.mapViewerShowMinimap)
 				return;
 
 			this._minimap = new Minimap(this.$refs.minimap_container);
@@ -425,13 +433,16 @@ module.exports = {
 			});
 		},
 
-		_cleanup() {
-			window.removeEventListener('resize', this._resize_handler);
-
+		_dispose_minimap() {
 			if (this._minimap) {
 				this._minimap.dispose();
 				this._minimap = null;
 			}
+		},
+
+		_cleanup() {
+			window.removeEventListener('resize', this._resize_handler);
+			this._dispose_minimap();
 
 			if (this._controls) {
 				this._controls.dispose();
