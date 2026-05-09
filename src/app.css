@@ -3991,26 +3991,6 @@ input[type=number]::-webkit-outer-spin-button {
 	pointer-events: none;
 }
 
-.map-viewer-close {
-	margin-left: auto;
-	pointer-events: all;
-	background: rgba(0, 0, 0, 0.5);
-	border: 1px solid rgba(255, 255, 255, 0.2);
-	color: #fff;
-	font-size: 18px;
-	width: 32px;
-	height: 32px;
-	border-radius: 4px;
-	cursor: pointer;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	transition: background 0.15s;
-}
-
-.map-viewer-close:hover {
-	background: rgba(255, 60, 60, 0.6);
-}
 
 /* map viewer panel (imgui-style) */
 .mv-panel {
@@ -4215,9 +4195,22 @@ input[type=number]::-webkit-outer-spin-button {
 	color: rgba(255, 255, 255, 0.85);
 }
 
-.mv-shortcuts {
+.mv-minimap-container {
 	position: absolute;
 	bottom: 16px;
+	right: 16px;
+	pointer-events: all;
+}
+
+.mv-minimap {
+	display: block;
+	border-radius: 4px;
+	cursor: crosshair;
+}
+
+.mv-shortcuts {
+	position: absolute;
+	top: 16px;
 	right: 16px;
 	display: flex;
 	flex-direction: column;

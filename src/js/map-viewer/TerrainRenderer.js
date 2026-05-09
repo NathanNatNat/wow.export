@@ -56,6 +56,14 @@ class TerrainRenderer {
 		this._vp_matrix = new Float32Array(16);
 	}
 
+	get tile_info() {
+		return this._tile_info;
+	}
+
+	get loaded_tiles() {
+		return this._tiles;
+	}
+
 	get tile_count() {
 		return this._tiles.size;
 	}
@@ -286,7 +294,8 @@ class TerrainRenderer {
 			x: geo.x,
 			y: geo.y,
 			bounds_min: geo.bounds_min,
-			bounds_max: geo.bounds_max
+			bounds_max: geo.bounds_max,
+			height_data: geo.height_data
 		};
 	}
 
@@ -349,6 +358,20 @@ class TerrainRenderer {
 		const tile_min = [Infinity, Infinity, Infinity];
 		const tile_max = [-Infinity, -Infinity, -Infinity];
 
+		// height grid: 129x129 from outer vertices (9 per chunk * 16 chunks + 1 shared edge... use 128+1)
+		// world x maps to grid cols, world z maps to grid rows
+		// we compute origin from tile coords and step from TILE_SIZE / 128
+		const h_cols = 129;
+		const h_rows = 129;
+		const height_grid = new Float32Array(h_cols * h_rows);
+		height_grid.fill(NaN);
+
+		// tile origin in world space (top-left corner of tile)
+		const tile_origin_x = (32 - ty) * TILE_SIZE;
+		const tile_origin_z = (32 - tx) * TILE_SIZE;
+		const h_step_x = -TILE_SIZE / 128;
+		const h_step_z = -TILE_SIZE / 128;
+
 		let vert_offset = 0;
 		let chunk_vert_base = 0;
 		let idx_offset = 0;
@@ -393,9 +416,6 @@ class TerrainRenderer {
 							vertex_data[di + 4] = 1;
 						}
 
-						// uv: map vertex to [0,1] across the tile
-						// u increases with col (matching composite canvas x = chunk y)
-						// v decreases with row (bake formula: v = (vz - origin) / TILE_SIZE, vz decreases with row)
 						const col_frac = is_short ? (col + 0.5) / 8 : col / 8;
 						vertex_data[di + 6] = (y + col_frac) / 16;
 						vertex_data[di + 7] = (x + row / 16) / 16;
@@ -413,6 +433,15 @@ class TerrainRenderer {
 						if (vx > chunk_max[0]) chunk_max[0] = vx;
 						if (vy > chunk_max[1]) chunk_max[1] = vy;
 						if (vz > chunk_max[2]) chunk_max[2] = vz;
+
+						// splat outer vertices into height grid
+						if (!is_short) {
+							const gx = Math.round((vx - tile_origin_x) / h_step_x);
+							const gz = Math.round((vz - tile_origin_z) / h_step_z);
+
+							if (gx >= 0 && gx < h_cols && gz >= 0 && gz < h_rows)
+								height_grid[gz * h_cols + gx] = vy;
+						}
 
 						vert_offset++;
 						idx++;
@@ -466,7 +495,16 @@ class TerrainRenderer {
 			x: tx,
 			y: ty,
 			bounds_min: tile_min,
-			bounds_max: tile_max
+			bounds_max: tile_max,
+			height_data: {
+				grid: height_grid,
+				cols: h_cols,
+				rows: h_rows,
+				origin_x: tile_origin_x,
+				origin_z: tile_origin_z,
+				step_x: h_step_x,
+				step_z: h_step_z
+			}
 		};
 	}
 
@@ -686,6 +724,42 @@ class TerrainRenderer {
 		}
 
 		return true;
+	}
+
+	get_height_at(world_x, world_z) {
+		const tx = Math.floor(32 - world_z / TILE_SIZE);
+		const ty = Math.floor(32 - world_x / TILE_SIZE);
+		const key = tx + '_' + ty;
+		const tile = this._tiles.get(key);
+
+		if (!tile?.height_data)
+			return null;
+
+		const hd = tile.height_data;
+		const gx = (world_x - hd.origin_x) / hd.step_x;
+		const gz = (world_z - hd.origin_z) / hd.step_z;
+
+		const ix = Math.floor(gx);
+		const iz = Math.floor(gz);
+
+		if (ix < 0 || ix >= hd.cols - 1 || iz < 0 || iz >= hd.rows - 1)
+			return null;
+
+		const fx = gx - ix;
+		const fz = gz - iz;
+
+		const h00 = hd.grid[iz * hd.cols + ix];
+		const h10 = hd.grid[iz * hd.cols + ix + 1];
+		const h01 = hd.grid[(iz + 1) * hd.cols + ix];
+		const h11 = hd.grid[(iz + 1) * hd.cols + ix + 1];
+
+		// any NaN means we're over a missing chunk
+		if (isNaN(h00) || isNaN(h10) || isNaN(h01) || isNaN(h11))
+			return null;
+
+		const h0 = h00 + (h10 - h00) * fx;
+		const h1 = h01 + (h11 - h01) * fx;
+		return h0 + (h1 - h0) * fz;
 	}
 
 	dispose() {

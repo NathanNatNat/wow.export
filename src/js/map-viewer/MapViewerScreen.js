@@ -4,6 +4,7 @@ const GLContext = require('../3D/gl/GLContext');
 const PerspectiveCamera = require('./PerspectiveCamera');
 const FreeCameraControls = require('./FreeCameraControls');
 const TerrainRenderer = require('./TerrainRenderer');
+const Minimap = require('./Minimap');
 
 const TILE_SIZE = constants.GAME.TILE_SIZE;
 
@@ -76,7 +77,6 @@ module.exports = {
 					<span class="map-viewer-status">{{ status_text }}</span>
 					<span v-if="coord_text" class="map-viewer-status">{{ coord_text }}</span>
 				</div>
-				<button class="map-viewer-close" @click="close" title="Close (Esc)">&#x2715;</button>
 			</div>
 			<div class="mv-panel">
 				<div v-for="section in sections" :key="section.id" class="mv-panel-section">
@@ -131,6 +131,7 @@ module.exports = {
 					</div>
 				</div>
 			</div>
+			<div ref="minimap_container" class="mv-minimap-container"></div>
 			<div class="mv-shortcuts">
 				<span class="mv-shortcut"><kbd>Esc</kbd> Exit Map</span>
 				<span class="mv-shortcut"><kbd>Alt+Z</kbd> Hide UI</span>
@@ -309,6 +310,11 @@ module.exports = {
 					const cam = this._camera.position;
 					this._terrain.update(cam);
 
+					// track height above terrain
+					const terrain_h = this._terrain.get_height_at(cam[0], cam[2]);
+					const ground = terrain_h !== null ? terrain_h : 0;
+					this._height_above_terrain = cam[1] - ground;
+
 					let visible;
 					if (this.texture_mode === 'Wireframe') {
 						const sky = hex_to_rgb(core.view.config.mapViewerSkyColor);
@@ -325,6 +331,13 @@ module.exports = {
 					const adt_x = Math.floor(32 - cam[2] / TILE_SIZE);
 					const adt_y = Math.floor(32 - cam[0] / TILE_SIZE);
 					this.coord_text = 'X: ' + cam[0].toFixed(1) + ' Y: ' + cam[2].toFixed(1) + ' Z: ' + cam[1].toFixed(1) + ' [' + adt_x + ', ' + adt_y + ']';
+
+					// update minimap
+					if (this._minimap) {
+						this._minimap.set_loaded_tiles(this._terrain.loaded_tiles);
+						this._minimap.set_camera(cam[0], cam[2]);
+						this._minimap.draw();
+					}
 				}
 
 				requestAnimationFrame(frame);
@@ -361,6 +374,7 @@ module.exports = {
 				this._terrain = terrain;
 				this._apply_sun_settings();
 				this._position_camera();
+				this._init_minimap();
 			} catch (e) {
 				this.status_text = 'Error: ' + e.message;
 				terrain.dispose();
@@ -388,10 +402,36 @@ module.exports = {
 			this._camera.position[2] = center[2];
 			this._controls.pitch = -0.6;
 			this._controls.yaw = 0;
+			this._height_above_terrain = 500;
+		},
+
+		_init_minimap() {
+			if (!this.$refs.minimap_container || !this._terrain)
+				return;
+
+			this._minimap = new Minimap(this.$refs.minimap_container);
+			this._minimap.set_tile_info(this._terrain.tile_info);
+
+			this._minimap.set_move_callback((world_x, world_z) => {
+				const cam = this._camera.position;
+
+				// compute height above terrain at new position
+				const terrain_h = this._terrain.get_height_at(world_x, world_z);
+				const ground = terrain_h !== null ? terrain_h : 0;
+
+				cam[0] = world_x;
+				cam[1] = ground + this._height_above_terrain;
+				cam[2] = world_z;
+			});
 		},
 
 		_cleanup() {
 			window.removeEventListener('resize', this._resize_handler);
+
+			if (this._minimap) {
+				this._minimap.dispose();
+				this._minimap = null;
+			}
 
 			if (this._controls) {
 				this._controls.dispose();
