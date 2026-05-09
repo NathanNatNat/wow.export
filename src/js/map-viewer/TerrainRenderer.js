@@ -16,6 +16,7 @@ const UNIT_SIZE_HALF = UNIT_SIZE / 2;
 const MAX_CONCURRENT_LOADS = 4;
 const UNLOAD_PADDING = 2;
 const DEFAULT_RENDER_DISTANCE = 8;
+const GRID_Y_BIAS = 0.5;
 
 // 256 chunks x 145 verts x 32 bytes (pos3f + normal3f + uv2f)
 const MAX_TILE_VERTEX_BYTES = 256 * 145 * 32;
@@ -54,6 +55,10 @@ class TerrainRenderer {
 		this._vao_pool = [];
 		this._frustum_planes = new Float32Array(24);
 		this._vp_matrix = new Float32Array(16);
+
+		this._grid_vao = null;
+		this._grid_vertex_count = 0;
+		this._grid_dirty = true;
 	}
 
 	get tile_info() {
@@ -82,6 +87,7 @@ class TerrainRenderer {
 		// force tile re-evaluation on next frame
 		this._last_tx = NaN;
 		this._last_ty = NaN;
+		this._grid_dirty = true;
 	}
 
 	async init(map_dir) {
@@ -138,6 +144,7 @@ class TerrainRenderer {
 			this._last_tx = tx;
 			this._last_ty = ty;
 			this._update_needed_tiles(tx, ty);
+			this._grid_dirty = true;
 		}
 
 		this._pump_load_queue();
@@ -259,6 +266,7 @@ class TerrainRenderer {
 			const tile = this._upload_tile(geo, minimap_blp);
 			this._tiles.set(key, tile);
 			this._chunk_count += tile.chunk_count;
+			this._grid_dirty = true;
 		}
 	}
 
@@ -762,6 +770,188 @@ class TerrainRenderer {
 		return h0 + (h1 - h0) * fz;
 	}
 
+	render_grid(view_matrix, projection_matrix, grid_color) {
+		if (!this.wire_shader.is_valid())
+			return;
+
+		if (this._grid_dirty)
+			this._rebuild_grid();
+
+		if (this._grid_vertex_count === 0)
+			return;
+
+		this.wire_shader.use();
+		this.wire_shader.set_uniform_mat4('u_view', false, view_matrix);
+		this.wire_shader.set_uniform_mat4('u_projection', false, projection_matrix);
+		this.wire_shader.set_uniform_3fv('u_terrain_color', grid_color);
+
+		this._grid_vao.bind();
+		this.gl.drawArrays(this.gl.LINES, 0, this._grid_vertex_count);
+	}
+
+	_rebuild_grid() {
+		this._grid_dirty = false;
+
+		const rd = this.render_distance;
+		const ctx = this._last_tx;
+		const cty = this._last_ty;
+
+		if (isNaN(ctx) || isNaN(cty)) {
+			this._grid_vertex_count = 0;
+			return;
+		}
+
+		const min_tx = ctx - rd;
+		const max_tx = ctx + rd;
+		const min_ty = cty - rd;
+		const max_ty = cty + rd;
+
+		// collect tiles: all tile_info entries + 1-cell border, clipped to render distance
+		const grid_set = new Set();
+		for (const info of this._tile_info.values()) {
+			for (let dx = -1; dx <= 1; dx++) {
+				for (let dy = -1; dy <= 1; dy++) {
+					const nx = info.x + dx;
+					const ny = info.y + dy;
+					if (nx >= 0 && nx < MAP_SIZE && ny >= 0 && ny < MAP_SIZE &&
+						nx >= min_tx && nx <= max_tx && ny >= min_ty && ny <= max_ty)
+						grid_set.add(nx + '_' + ny);
+				}
+			}
+		}
+
+		if (grid_set.size === 0) {
+			this._grid_vertex_count = 0;
+			return;
+		}
+
+		// pre-count vertices
+		let total_verts = 0;
+		for (const key of grid_set) {
+			if (this._tiles.get(key)?.height_data)
+				total_verts += 4 * 128 * 2;
+			else
+				total_verts += 4 * 2;
+		}
+
+		const positions = new Float32Array(total_verts * 3);
+		let vi = 0;
+
+		for (const key of grid_set) {
+			const sep = key.indexOf('_');
+			const tx = parseInt(key.substring(0, sep));
+			const ty = parseInt(key.substring(sep + 1));
+			vi = this._grid_write_tile(positions, vi, tx, ty);
+		}
+
+		this._grid_vertex_count = vi;
+
+		if (vi === 0)
+			return;
+
+		const gl = this.gl;
+		if (!this._grid_vao) {
+			this._grid_vao = new VertexArray(this.ctx);
+			this._grid_vao.bind();
+			this._grid_vao.vbo = gl.createBuffer();
+			gl.bindBuffer(gl.ARRAY_BUFFER, this._grid_vao.vbo);
+			gl.enableVertexAttribArray(0);
+			gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
+		} else {
+			this._grid_vao.bind();
+			gl.bindBuffer(gl.ARRAY_BUFFER, this._grid_vao.vbo);
+		}
+
+		gl.bufferData(gl.ARRAY_BUFFER, positions.subarray(0, vi * 3), gl.DYNAMIC_DRAW);
+	}
+
+	_grid_write_tile(positions, vi, tx, ty) {
+		const ox = (32 - ty) * TILE_SIZE;
+		const oz = (32 - tx) * TILE_SIZE;
+		const ex = ox - TILE_SIZE;
+		const ez = oz - TILE_SIZE;
+
+		const tile = this._tiles.get(tx + '_' + ty);
+
+		if (tile?.height_data) {
+			const grid = tile.height_data.grid;
+
+			// top edge (row 0): z = oz, x varies
+			vi = this._grid_write_h_edge(positions, vi, grid, 0, ox, oz);
+			// bottom edge (row 128): z = ez, x varies
+			vi = this._grid_write_h_edge(positions, vi, grid, 128 * 129, ox, ez);
+			// left edge (col 0): x = ox, z varies
+			vi = this._grid_write_v_edge(positions, vi, grid, 0, ox, oz);
+			// right edge (col 128): x = ex, z varies
+			vi = this._grid_write_v_edge(positions, vi, grid, 128, ex, oz);
+		} else {
+			// flat edges, skip if adjacent tile is loaded (it draws the shared edge)
+			const adj_top = this._tiles.get((tx - 1) + '_' + ty);
+			const adj_bot = this._tiles.get((tx + 1) + '_' + ty);
+			const adj_left = this._tiles.get(tx + '_' + (ty - 1));
+			const adj_right = this._tiles.get(tx + '_' + (ty + 1));
+
+			if (!adj_top?.height_data)
+				vi = this._grid_write_flat(positions, vi, ox, oz, ex, oz);
+
+			if (!adj_bot?.height_data)
+				vi = this._grid_write_flat(positions, vi, ox, ez, ex, ez);
+
+			if (!adj_left?.height_data)
+				vi = this._grid_write_flat(positions, vi, ox, oz, ox, ez);
+
+			if (!adj_right?.height_data)
+				vi = this._grid_write_flat(positions, vi, ex, oz, ex, ez);
+		}
+
+		return vi;
+	}
+
+	_grid_write_h_edge(positions, vi, grid, row_offset, ox, z) {
+		const step = -TILE_SIZE / 128;
+		for (let i = 0; i < 128; i++) {
+			const h0 = grid[row_offset + i];
+			const h1 = grid[row_offset + i + 1];
+			const pi = vi * 3;
+			positions[pi] = ox + i * step;
+			positions[pi + 1] = (isNaN(h0) ? 0 : h0) + GRID_Y_BIAS;
+			positions[pi + 2] = z;
+			positions[pi + 3] = ox + (i + 1) * step;
+			positions[pi + 4] = (isNaN(h1) ? 0 : h1) + GRID_Y_BIAS;
+			positions[pi + 5] = z;
+			vi += 2;
+		}
+		return vi;
+	}
+
+	_grid_write_v_edge(positions, vi, grid, col_offset, x, oz) {
+		const step = -TILE_SIZE / 128;
+		for (let i = 0; i < 128; i++) {
+			const h0 = grid[col_offset + i * 129];
+			const h1 = grid[col_offset + (i + 1) * 129];
+			const pi = vi * 3;
+			positions[pi] = x;
+			positions[pi + 1] = (isNaN(h0) ? 0 : h0) + GRID_Y_BIAS;
+			positions[pi + 2] = oz + i * step;
+			positions[pi + 3] = x;
+			positions[pi + 4] = (isNaN(h1) ? 0 : h1) + GRID_Y_BIAS;
+			positions[pi + 5] = oz + (i + 1) * step;
+			vi += 2;
+		}
+		return vi;
+	}
+
+	_grid_write_flat(positions, vi, x0, z0, x1, z1) {
+		const pi = vi * 3;
+		positions[pi] = x0;
+		positions[pi + 1] = GRID_Y_BIAS;
+		positions[pi + 2] = z0;
+		positions[pi + 3] = x1;
+		positions[pi + 4] = GRID_Y_BIAS;
+		positions[pi + 5] = z1;
+		return vi + 2;
+	}
+
 	dispose() {
 		this._disposed = true;
 		this._loading.clear();
@@ -781,6 +971,11 @@ class TerrainRenderer {
 			vao.dispose();
 
 		this._vao_pool.length = 0;
+
+		if (this._grid_vao) {
+			this._grid_vao.dispose();
+			this._grid_vao = null;
+		}
 
 		if (this.shader) {
 			Shaders.unregister(this.shader);

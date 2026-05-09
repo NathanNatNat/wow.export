@@ -7,6 +7,7 @@ const TerrainRenderer = require('./TerrainRenderer');
 const Minimap = require('./Minimap');
 
 const TILE_SIZE = constants.GAME.TILE_SIZE;
+const GRID_COLOR = new Float32Array([0x57 / 255, 0xAF / 255, 0xE2 / 255]);
 
 const SECTIONS = [
 	{
@@ -42,7 +43,8 @@ const SECTIONS = [
 			{ type: 'dropdown', data_key: 'texture_mode', label: 'Texture Mode', options: ['Flat', 'Wireframe', 'Minimap'] },
 			{ type: 'color', key: 'mapViewerTerrainColor', label: 'Terrain Colour', visible_mode: 'Flat' },
 			{ type: 'color', key: 'mapViewerWireframeColor', label: 'Wireframe Colour', visible_mode: 'Wireframe' },
-			{ type: 'checkbox', key: 'mapViewerWireframeOcclusion', label: 'Depth Occlusion', visible_mode: 'Wireframe' }
+			{ type: 'checkbox', key: 'mapViewerWireframeOcclusion', label: 'Depth Occlusion', visible_mode: 'Wireframe' },
+			{ type: 'checkbox', data_key: 'show_adt_bounds', label: 'Show ADT Region Bounds' }
 		]
 	},
 	{
@@ -91,8 +93,8 @@ module.exports = {
 								<label v-if="ctrl.type === 'checkbox'" class="mv-panel-checkbox-row">
 									<input
 										type="checkbox"
-										:checked="config[ctrl.key]"
-										@change="config[ctrl.key] = $event.target.checked"
+										:checked="get_ctrl_value(ctrl)"
+										@change="set_ctrl_value(ctrl, $event.target.checked)"
 									/>
 									<span class="mv-panel-label">{{ ctrl.label }}</span>
 								</label>
@@ -148,7 +150,8 @@ module.exports = {
 			show_ui: true,
 			open_section: null,
 			sections: SECTIONS,
-			texture_mode: 'Flat'
+			texture_mode: 'Flat',
+			show_adt_bounds: false
 		};
 	},
 
@@ -332,6 +335,9 @@ module.exports = {
 					} else {
 						visible = this._terrain.render(this._camera.view_matrix, this._camera.projection_matrix, this._terrain_color);
 					}
+					if (this.show_adt_bounds)
+						this._terrain.render_grid(this._camera.view_matrix, this._camera.projection_matrix, GRID_COLOR);
+
 					const loaded = this._terrain.tile_count;
 					const loading = this._terrain.loading_count;
 					this.status_text = loaded + ' ADT (' + loading + ' queued), render (' + visible + '/' + this._terrain.chunk_count + ')';
