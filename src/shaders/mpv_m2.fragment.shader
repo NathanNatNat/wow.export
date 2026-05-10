@@ -31,9 +31,8 @@ uniform float u_fog_end;
 
 out vec4 frag_color;
 
-const vec3 SKY_COLOR = vec3(0.4, 0.5, 0.7);
-const vec3 GROUND_COLOR = vec3(0.25, 0.2, 0.15);
-const float AMBIENT = 0.25;
+const vec3 SKY_AMBIENT = vec3(0.6, 0.65, 0.7);
+const vec3 GROUND_AMBIENT = vec3(0.35, 0.3, 0.25);
 
 vec3 calc_lighting(vec3 color) {
 	if (u_apply_lighting == 0)
@@ -43,7 +42,7 @@ vec3 calc_lighting(vec3 color) {
 	float n_dot_l = max(dot(n, u_light_dir), 0.0);
 
 	float sky_factor = 0.5 + 0.5 * n.y;
-	vec3 ambient = mix(GROUND_COLOR, SKY_COLOR, sky_factor) * AMBIENT;
+	vec3 ambient = mix(GROUND_AMBIENT, SKY_AMBIENT, sky_factor);
 	vec3 diffuse = u_sun_color * n_dot_l * u_sun_intensity;
 
 	return color * (ambient + diffuse);
