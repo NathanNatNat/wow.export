@@ -280,6 +280,15 @@ class LiquidRenderer {
 		if (instances.length === 0)
 			return;
 
+		// sort by info reference to minimize uniform changes during render
+		const info_order = new Map();
+		let next_order = 0;
+		for (const inst of instances) {
+			if (!info_order.has(inst.info))
+				info_order.set(inst.info, next_order++);
+		}
+		instances.sort((a, b) => info_order.get(a.info) - info_order.get(b.info));
+
 		// build flat bounds array and tile-level AABB
 		const count = instances.length;
 		const bounds = new Float32Array(count * 6);
@@ -544,6 +553,7 @@ class LiquidRenderer {
 		const planes = this._frustum_planes;
 
 		let drawn = 0;
+		let last_info = null;
 
 		for (const tile of this._tile_data.values()) {
 			if (!this._is_tile_visible(tile, planes))
@@ -555,18 +565,22 @@ class LiquidRenderer {
 					continue;
 
 				const inst = tile.instances[i];
-				shader.set_uniform_1i('u_material_id', inst.info.material_id);
-				shader.set_uniform_1i('u_liquid_flags', inst.info.flags);
-				shader.set_uniform_3fv('u_liquid_color', inst.info.color);
-				shader.set_uniform_1f('u_float0', inst.info.float0);
-				shader.set_uniform_1f('u_float1', inst.info.float1);
 
-				const tex_key = inst.info.texture_id || inst.info.texture_path;
-				const tex = tex_key
-					? (this._texture_cache.get(tex_key) ?? this._default_texture)
-					: this._default_texture;
+				if (inst.info !== last_info) {
+					last_info = inst.info;
+					shader.set_uniform_1i('u_material_id', last_info.material_id);
+					shader.set_uniform_1i('u_liquid_flags', last_info.flags);
+					shader.set_uniform_3fv('u_liquid_color', last_info.color);
+					shader.set_uniform_1f('u_float0', last_info.float0);
+					shader.set_uniform_1f('u_float1', last_info.float1);
 
-				tex.bind(0);
+					const tex_key = last_info.texture_id || last_info.texture_path;
+					const tex = tex_key
+						? (this._texture_cache.get(tex_key) ?? this._default_texture)
+						: this._default_texture;
+
+					tex.bind(0);
+				}
 
 				inst.vao.bind();
 				gl.drawElements(gl.TRIANGLES, inst.index_count, gl.UNSIGNED_SHORT, 0);
