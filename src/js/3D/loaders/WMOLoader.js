@@ -94,7 +94,6 @@ const WMOOptionalChunks = [
 	0x4D4F5056, // MOPV (Portal Vertices)
 	0x4D4F5052, // MOPR (Map Object Portal References)
 	0x4D4F5054, // MOPT (Portal Triangles)
-	0x4D4F4356, // MOCV (Vertex Colors)
 	0x4D44414C, // MDAL (Ambient Color)
 ];
 

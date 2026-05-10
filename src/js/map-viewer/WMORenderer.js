@@ -8,7 +8,10 @@ const core = require('../core');
 const constants = require('../constants');
 const Shaders = require('../3D/Shaders');
 const VertexArray = require('../3D/gl/VertexArray');
+const GLTexture = require('../3D/gl/GLTexture');
+const BLPFile = require('../casc/blp');
 const WMOLoader = require('../3D/loaders/WMOLoader');
+const WMOShaderMapper = require('../3D/WMOShaderMapper');
 const ADTLoader = require('../3D/loaders/ADTLoader');
 const listfile = require('../casc/listfile');
 const log = require('../log');
@@ -19,7 +22,9 @@ const MAX_OBJ0_CONCURRENT = 2;
 const MAX_WMO_CONCURRENT = 1;
 const UPLOAD_BUDGET_GROUPS = 2;
 const CAMERA_DIRTY_THRESHOLD_SQ = 33.33 * 33.33;
-const WMO_VERTEX_STRIDE = 24;
+
+// pos(3f) + normal(3f) + uv1(2f) + uv2(2f) + uv3(2f) + color1(4ub) + color2(4ub) = 56
+const WMO_VERTEX_STRIDE = 56;
 
 const BBOX_COLOR = new Float32Array([1, 0.8, 0]);
 
@@ -65,7 +70,7 @@ function compute_wmo_model_matrix(position, rotation, scale) {
 
 /**
  * build interleaved vertex data from a WMO group.
- * format: position(3f) + normal(3f) = 24 bytes
+ * format: pos(3f) + normal(3f) + uv1(2f) + uv2(2f) + uv3(2f) + color1(4ub) + color2(4ub) = 56 bytes
  */
 function build_group_geometry(group) {
 	if (!group.vertices || !group.normals || !group.indices)
@@ -78,22 +83,159 @@ function build_group_geometry(group) {
 	const vertex_data = new ArrayBuffer(vert_count * WMO_VERTEX_STRIDE);
 	const view = new DataView(vertex_data);
 
+	const uvs1 = group.uvs?.[0];
+	const uvs2 = group.uvs?.[1];
+	const uvs3 = group.uvs?.[2];
+	const colors1 = group.vertexColours?.[0];
+	const colors2 = group.vertexColours?.[1];
+
 	for (let i = 0; i < vert_count; i++) {
 		const offset = i * WMO_VERTEX_STRIDE;
 		const v = i * 3;
+		const uv = i * 2;
+		const c = i * 4;
 
+		// position
 		view.setFloat32(offset, group.vertices[v], true);
 		view.setFloat32(offset + 4, group.vertices[v + 1], true);
 		view.setFloat32(offset + 8, group.vertices[v + 2], true);
 
+		// normal
 		view.setFloat32(offset + 12, group.normals[v], true);
 		view.setFloat32(offset + 16, group.normals[v + 1], true);
 		view.setFloat32(offset + 20, group.normals[v + 2], true);
+
+		// uv1
+		if (uvs1) {
+			view.setFloat32(offset + 24, uvs1[uv], true);
+			view.setFloat32(offset + 28, uvs1[uv + 1], true);
+		}
+
+		// uv2
+		if (uvs2) {
+			view.setFloat32(offset + 32, uvs2[uv], true);
+			view.setFloat32(offset + 36, uvs2[uv + 1], true);
+		}
+
+		// uv3
+		if (uvs3) {
+			view.setFloat32(offset + 40, uvs3[uv], true);
+			view.setFloat32(offset + 44, uvs3[uv + 1], true);
+		}
+
+		// color1 (BGRA in file → RGBA swizzle)
+		if (colors1) {
+			view.setUint8(offset + 48, colors1[c + 2]);
+			view.setUint8(offset + 49, colors1[c + 1]);
+			view.setUint8(offset + 50, colors1[c]);
+			view.setUint8(offset + 51, colors1[c + 3]);
+		} else {
+			view.setUint32(offset + 48, 0xFFFFFFFF);
+		}
+
+		// color2 (BGRA → RGBA)
+		if (colors2) {
+			view.setUint8(offset + 52, colors2[c + 2]);
+			view.setUint8(offset + 53, colors2[c + 1]);
+			view.setUint8(offset + 54, colors2[c]);
+			view.setUint8(offset + 55, colors2[c + 3]);
+		} else {
+			view.setUint32(offset + 52, 0xFFFFFFFF);
+		}
 	}
 
 	const index_data = new Uint16Array(group.indices);
 
 	return { vertex_data, index_data, index_count: index_data.length };
+}
+
+/**
+ * build draw call descriptors from a group's render batches.
+ */
+function build_group_draw_calls(group, materials, material_tex_ids) {
+	if (!group.renderBatches || group.renderBatches.length === 0)
+		return [];
+
+	const draw_calls = [];
+
+	for (const batch of group.renderBatches) {
+		const mat_id = ((batch.flags & 2) === 2) ? batch.possibleBox2[2] : batch.materialID;
+		const material = materials?.[mat_id];
+
+		if (!material) {
+			draw_calls.push({
+				start: batch.firstFace,
+				count: batch.numFaces,
+				blend_mode: 0,
+				vertex_shader: 0,
+				pixel_shader: 0,
+				flags: 0,
+				tex_ids: [0, 0, 0]
+			});
+			continue;
+		}
+
+		const shader_info = WMOShaderMapper.WMOShaderMap[material.shader] ?? { VertexShader: 0, PixelShader: 0 };
+		const tex_ids = material_tex_ids.get(mat_id) ?? [0, 0, 0];
+
+		draw_calls.push({
+			start: batch.firstFace,
+			count: batch.numFaces,
+			blend_mode: material.blendMode,
+			vertex_shader: shader_info.VertexShader,
+			pixel_shader: shader_info.PixelShader,
+			flags: material.flags,
+			tex_ids
+		});
+	}
+
+	return draw_calls;
+}
+
+/**
+ * collect texture fileDataIDs from WMO materials.
+ * returns material_tex_ids map and unique_textures map with wrap info.
+ */
+function collect_wmo_textures(wmo) {
+	const material_tex_ids = new Map();
+	const unique_textures = new Map();
+	const is_classic = !!wmo.textureNames;
+
+	if (!wmo.materials)
+		return { material_tex_ids, unique_textures };
+
+	for (let i = 0; i < wmo.materials.length; i++) {
+		const mat = wmo.materials[i];
+		const shader_info = WMOShaderMapper.WMOShaderMap[mat.shader];
+
+		// skip LOD materials
+		if (shader_info && shader_info.PixelShader === 18)
+			continue;
+
+		let tex_ids;
+		if (is_classic) {
+			tex_ids = [
+				listfile.getByFilename(wmo.textureNames[mat.texture1]) || 0,
+				listfile.getByFilename(wmo.textureNames[mat.texture2]) || 0,
+				listfile.getByFilename(wmo.textureNames[mat.texture3]) || 0
+			];
+		} else {
+			tex_ids = [mat.texture1, mat.texture2, mat.texture3];
+		}
+
+		material_tex_ids.set(i, tex_ids);
+
+		// WMO wrap flags are inverted: 0x40=clamp_s, 0x80=clamp_t
+		const wrap_s = !(mat.flags & 0x40);
+		const wrap_t = !(mat.flags & 0x80);
+
+		for (const fid of tex_ids) {
+			if (fid > 0 && !unique_textures.has(fid))
+				unique_textures.set(fid, { wrap_s, wrap_t });
+		}
+	}
+
+	return { material_tex_ids, unique_textures };
 }
 
 class WMORenderer {
@@ -106,6 +248,7 @@ class WMORenderer {
 
 		this._model_cache = new Map();
 		this._tile_data = new Map();
+		this._texture_cache = new Map();
 
 		this._obj0_load_queue = [];
 		this._obj0_loading = new Set();
@@ -123,6 +266,14 @@ class WMORenderer {
 		this._selected_id = 0;
 		this._selected_instance = null;
 		this._bbox_vao = null;
+
+		this._default_texture = this._create_default_texture();
+	}
+
+	_create_default_texture() {
+		const tex = new GLTexture(this.ctx);
+		tex.set_rgba(new Uint8Array([255, 255, 255, 255]), 1, 1, { has_alpha: false });
+		return tex;
 	}
 
 	get model_count() {
@@ -233,6 +384,10 @@ class WMORenderer {
 		shader.set_uniform_3fv('u_sun_color', sun_color);
 		shader.set_uniform_1f('u_sun_intensity', sun_intensity);
 
+		shader.set_uniform_1i('u_texture1', 0);
+		shader.set_uniform_1i('u_texture2', 1);
+		shader.set_uniform_1i('u_texture3', 2);
+
 		if (fog_params && fog_params.fog_uniforms) {
 			const fog = fog_params.fog_uniforms;
 			shader.set_uniform_3fv('u_camera_pos', fog_params.camera_pos);
@@ -271,12 +426,34 @@ class WMORenderer {
 
 				for (const group of entry.groups) {
 					group.vao.bind();
-					gl.drawElements(gl.TRIANGLES, group.index_count, gl.UNSIGNED_SHORT, 0);
+
+					for (const dc of group.draw_calls) {
+						shader.set_uniform_1i('u_vertex_shader', dc.vertex_shader);
+						shader.set_uniform_1i('u_pixel_shader', dc.pixel_shader);
+						shader.set_uniform_1i('u_blend_mode', dc.blend_mode);
+						shader.set_uniform_1i('u_apply_lighting', (dc.flags & 0x01) ? 0 : 1);
+
+						ctx.apply_blend_mode(dc.blend_mode);
+
+						for (let t = 0; t < 3; t++) {
+							const fid = dc.tex_ids[t];
+							const cached = fid > 0 ? this._texture_cache.get(fid) : null;
+							const tex = cached?.texture ?? this._default_texture;
+							tex.bind(t);
+						}
+
+						gl.drawElements(gl.TRIANGLES, dc.count, gl.UNSIGNED_SHORT, dc.start * 2);
+					}
 				}
 
 				drawn++;
 			}
 		}
+
+		// reset state after transparent batches
+		ctx.set_blend(false);
+		ctx.set_depth_write(true);
+		ctx.set_cull_face(false);
 
 		return drawn;
 	}
@@ -390,6 +567,7 @@ class WMORenderer {
 					entry = {
 						groups: null,
 						bounding_box: null,
+						texture_ids: null,
 						ref_count: 0,
 						tile_placements: new Map(),
 						culled_instances: [],
@@ -447,7 +625,10 @@ class WMORenderer {
 				return;
 			}
 
-			// load all groups and build geometry
+			// collect material texture references
+			const { material_tex_ids, unique_textures } = collect_wmo_textures(wmo);
+
+			// load groups, build geometry + draw calls
 			const group_data = [];
 			for (let i = 0; i < wmo.groupCount; i++) {
 				if (this._disposed || !this._model_cache.has(file_data_id))
@@ -456,10 +637,38 @@ class WMORenderer {
 				try {
 					const group = await wmo.getGroup(i);
 					const geo = build_group_geometry(group);
-					if (geo)
-						group_data.push(geo);
+					if (!geo)
+						continue;
+
+					const draw_calls = build_group_draw_calls(group, wmo.materials, material_tex_ids);
+					if (draw_calls.length === 0)
+						continue;
+
+					group_data.push({ ...geo, draw_calls });
 				} catch (e) {
 					log.write('Failed to load WMO group ' + i + ' for ' + file_data_id + ': ' + e.message);
+				}
+			}
+
+			if (this._disposed || !this._model_cache.has(file_data_id)) {
+				this._wmo_loading.delete(file_data_id);
+				return;
+			}
+
+			// fetch BLP files for uncached textures
+			const texture_loads = new Map();
+			for (const [fid, wrap_info] of unique_textures) {
+				if (this._disposed || !this._model_cache.has(file_data_id))
+					break;
+
+				if (this._texture_cache.has(fid))
+					continue;
+
+				try {
+					const data = await this._casc.getFile(fid);
+					texture_loads.set(fid, { blp: new BLPFile(data), wrap_s: wrap_info.wrap_s, wrap_t: wrap_info.wrap_t });
+				} catch (e) {
+					log.write('Failed to load WMO texture ' + fid + ': ' + e.message);
 				}
 			}
 
@@ -477,7 +686,7 @@ class WMORenderer {
 			} : null;
 
 			if (group_data.length > 0)
-				this._upload_queue.push({ file_data_id, group_data, bounding_box });
+				this._upload_queue.push({ file_data_id, group_data, texture_loads, bounding_box });
 		} catch (e) {
 			log.write('Failed to load WMO model ' + file_data_id + ': ' + e.message);
 		}
@@ -497,10 +706,13 @@ class WMORenderer {
 				continue;
 			}
 
-			// upload one group at a time to spread GPU work
-			if (!entry.groups)
+			// upload textures + init groups on first access
+			if (!entry.groups) {
 				entry.groups = [];
+				this._upload_textures(entry, item);
+			}
 
+			// upload one group at a time to spread GPU work
 			const geo = item.group_data.shift();
 			if (geo) {
 				this._upload_group(entry, geo);
@@ -516,6 +728,36 @@ class WMORenderer {
 		}
 	}
 
+	_upload_textures(entry, data) {
+		// upload new BLPs to GPU
+		for (const [fid, tex_load] of data.texture_loads) {
+			if (!this._texture_cache.has(fid)) {
+				const gl_tex = new GLTexture(this.ctx);
+				if (tex_load.blp)
+					gl_tex.set_blp(tex_load.blp, { wrap_s: tex_load.wrap_s, wrap_t: tex_load.wrap_t });
+
+				this._texture_cache.set(fid, { texture: gl_tex, ref_count: 0 });
+			}
+		}
+
+		// ref-count all unique textures used by this model's draw calls
+		const model_tex_ids = new Set();
+		for (const group of data.group_data) {
+			for (const dc of group.draw_calls) {
+				for (const fid of dc.tex_ids) {
+					if (fid > 0 && !model_tex_ids.has(fid)) {
+						model_tex_ids.add(fid);
+						const cached = this._texture_cache.get(fid);
+						if (cached)
+							cached.ref_count++;
+					}
+				}
+			}
+		}
+
+		entry.texture_ids = model_tex_ids;
+	}
+
 	_upload_group(entry, geo) {
 		const gl = this.gl;
 		const vao = new VertexArray(this.ctx);
@@ -523,15 +765,39 @@ class WMORenderer {
 
 		vao.set_vertex_buffer(geo.vertex_data);
 
-		// pos(3f) + normal(3f) = 24 bytes
+		const stride = WMO_VERTEX_STRIDE;
+
+		// pos(3f) @ 0
 		gl.enableVertexAttribArray(0);
-		gl.vertexAttribPointer(0, 3, gl.FLOAT, false, WMO_VERTEX_STRIDE, 0);
+		gl.vertexAttribPointer(0, 3, gl.FLOAT, false, stride, 0);
+
+		// normal(3f) @ 12
 		gl.enableVertexAttribArray(1);
-		gl.vertexAttribPointer(1, 3, gl.FLOAT, false, WMO_VERTEX_STRIDE, 12);
+		gl.vertexAttribPointer(1, 3, gl.FLOAT, false, stride, 12);
+
+		// uv1(2f) @ 24
+		gl.enableVertexAttribArray(4);
+		gl.vertexAttribPointer(4, 2, gl.FLOAT, false, stride, 24);
+
+		// uv2(2f) @ 32
+		gl.enableVertexAttribArray(5);
+		gl.vertexAttribPointer(5, 2, gl.FLOAT, false, stride, 32);
+
+		// uv3(2f) @ 40
+		gl.enableVertexAttribArray(8);
+		gl.vertexAttribPointer(8, 2, gl.FLOAT, false, stride, 40);
+
+		// color1(4ub) @ 48
+		gl.enableVertexAttribArray(6);
+		gl.vertexAttribPointer(6, 4, gl.UNSIGNED_BYTE, true, stride, 48);
+
+		// color2(4ub) @ 52
+		gl.enableVertexAttribArray(7);
+		gl.vertexAttribPointer(7, 4, gl.UNSIGNED_BYTE, true, stride, 52);
 
 		vao.set_index_buffer(geo.index_data);
 
-		entry.groups.push({ vao, index_count: geo.index_count });
+		entry.groups.push({ vao, draw_calls: geo.draw_calls });
 	}
 
 	_rebuild_culled_lists(camera_pos) {
@@ -601,6 +867,21 @@ class WMORenderer {
 		if (entry.groups) {
 			for (const group of entry.groups)
 				group.vao.dispose();
+		}
+
+		// release ref-counted textures
+		if (entry.texture_ids) {
+			for (const fid of entry.texture_ids) {
+				const cached = this._texture_cache.get(fid);
+				if (!cached)
+					continue;
+
+				cached.ref_count--;
+				if (cached.ref_count <= 0) {
+					cached.texture.dispose();
+					this._texture_cache.delete(fid);
+				}
+			}
 		}
 
 		this._model_cache.delete(file_data_id);
@@ -832,6 +1113,17 @@ class WMORenderer {
 
 		this._model_cache.clear();
 		this._tile_data.clear();
+
+		// dispose remaining cached textures
+		for (const cached of this._texture_cache.values())
+			cached.texture.dispose();
+
+		this._texture_cache.clear();
+
+		if (this._default_texture) {
+			this._default_texture.dispose();
+			this._default_texture = null;
+		}
 
 		if (this._bbox_vao) {
 			this._bbox_vao.dispose();
