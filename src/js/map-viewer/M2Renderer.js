@@ -7,7 +7,11 @@
 const core = require('../core');
 const constants = require('../constants');
 const Shaders = require('../3D/Shaders');
+const ShaderMapper = require('../3D/ShaderMapper');
 const VertexArray = require('../3D/gl/VertexArray');
+const GLTexture = require('../3D/gl/GLTexture');
+const GLContext = require('../3D/gl/GLContext');
+const BLPFile = require('../casc/blp');
 const M2Loader = require('../3D/loaders/M2Loader');
 const ADTLoader = require('../3D/loaders/ADTLoader');
 const listfile = require('../casc/listfile');
@@ -20,6 +24,80 @@ const MAX_M2_CONCURRENT = 2;
 const UPLOAD_BUDGET = 2;
 const CAMERA_DIRTY_THRESHOLD_SQ = 33.33 * 33.33;
 const M2_VERTEX_STRIDE = 40;
+const ALPHA_TEST_VALUE = 0.501960814;
+
+const VERTEX_SHADER_IDS = {
+	'Diffuse_T1': 0,
+	'Diffuse_Env': 1,
+	'Diffuse_T1_T2': 2,
+	'Diffuse_T1_Env': 3,
+	'Diffuse_Env_T1': 4,
+	'Diffuse_Env_Env': 5,
+	'Diffuse_T1_Env_T1': 6,
+	'Diffuse_T1_T1': 7,
+	'Diffuse_T1_T1_T1': 8,
+	'Diffuse_EdgeFade_T1': 9,
+	'Diffuse_T2': 10,
+	'Diffuse_T1_Env_T2': 11,
+	'Diffuse_EdgeFade_T1_T2': 12,
+	'Diffuse_EdgeFade_Env': 13,
+	'Diffuse_T1_T2_T1': 14,
+	'Diffuse_T1_T2_T3': 15,
+	'Color_T1_T2_T3': 16,
+	'BW_Diffuse_T1': 17,
+	'BW_Diffuse_T1_T2': 18
+};
+
+const PIXEL_SHADER_IDS = {
+	'Combiners_Opaque': 0,
+	'Combiners_Mod': 1,
+	'Combiners_Opaque_Mod': 2,
+	'Combiners_Opaque_Mod2x': 3,
+	'Combiners_Opaque_Mod2xNA': 4,
+	'Combiners_Opaque_Opaque': 5,
+	'Combiners_Mod_Mod': 6,
+	'Combiners_Mod_Mod2x': 7,
+	'Combiners_Mod_Add': 8,
+	'Combiners_Mod_Mod2xNA': 9,
+	'Combiners_Mod_AddNA': 10,
+	'Combiners_Mod_Opaque': 11,
+	'Combiners_Opaque_Mod2xNA_Alpha': 12,
+	'Combiners_Opaque_AddAlpha': 13,
+	'Combiners_Opaque_AddAlpha_Alpha': 14,
+	'Combiners_Opaque_Mod2xNA_Alpha_Add': 15,
+	'Combiners_Mod_AddAlpha': 16,
+	'Combiners_Mod_AddAlpha_Alpha': 17,
+	'Combiners_Opaque_Alpha_Alpha': 18,
+	'Combiners_Opaque_Mod2xNA_Alpha_3s': 19,
+	'Combiners_Opaque_AddAlpha_Wgt': 20,
+	'Combiners_Mod_Add_Alpha': 21,
+	'Combiners_Opaque_ModNA_Alpha': 22,
+	'Combiners_Mod_AddAlpha_Wgt': 23,
+	'Combiners_Opaque_Mod_Add_Wgt': 24,
+	'Combiners_Opaque_Mod2xNA_Alpha_UnshAlpha': 25,
+	'Combiners_Mod_Dual_Crossfade': 26,
+	'Combiners_Opaque_Mod2xNA_Alpha_Alpha': 27,
+	'Combiners_Mod_Masked_Dual_Crossfade': 28,
+	'Combiners_Opaque_Alpha': 29,
+	'Guild': 30,
+	'Guild_NoBorder': 31,
+	'Guild_Opaque': 32,
+	'Combiners_Mod_Depth': 33,
+	'Illum': 34,
+	'Combiners_Mod_Mod_Mod_Const': 35,
+	'Combiners_Mod_Mod_Depth': 36
+};
+
+const M2BLEND_TO_EGX = [
+	GLContext.BlendMode.OPAQUE,
+	GLContext.BlendMode.ALPHA_KEY,
+	GLContext.BlendMode.ALPHA,
+	GLContext.BlendMode.NO_ALPHA_ADD,
+	GLContext.BlendMode.ADD,
+	GLContext.BlendMode.MOD,
+	GLContext.BlendMode.MOD2X,
+	GLContext.BlendMode.BLEND_ADD
+];
 
 /**
  * compute model matrix from MDDF placement data.
@@ -105,6 +183,79 @@ function build_model_geometry(m2, skin) {
 	return { vertex_data, index_data, index_count: index_data.length };
 }
 
+/**
+ * build draw call descriptors from skin texture units.
+ * resolves shader IDs, blend modes, material flags, and texture fileDataIDs.
+ */
+function build_draw_calls(m2, skin) {
+	const draw_calls = [];
+
+	for (let i = 0; i < skin.subMeshes.length; i++) {
+		const submesh = skin.subMeshes[i];
+		const tex_unit = skin.textureUnits.find(tu => tu.skinSectionIndex === i);
+
+		let tex_file_ids = [0, 0, 0, 0];
+		let tex_flags = [0, 0, 0, 0];
+		let vertex_shader = 0;
+		let pixel_shader = 0;
+		let blend_mode = 0;
+		let flags = 0;
+
+		if (tex_unit) {
+			const texture_count = tex_unit.textureCount;
+
+			for (let j = 0; j < Math.min(texture_count, 4); j++) {
+				const combo_idx = tex_unit.textureComboIndex + j;
+				if (combo_idx < m2.textureCombos.length) {
+					const tex_idx = m2.textureCombos[combo_idx];
+					if (tex_idx < m2.textures.length) {
+						const tex = m2.textures[tex_idx];
+						if (tex.fileDataID > 0) {
+							tex_file_ids[j] = tex.fileDataID;
+							tex_flags[j] = tex.flags;
+						}
+					}
+				}
+			}
+
+			const vs_name = ShaderMapper.getVertexShader(texture_count, tex_unit.shaderID);
+			vertex_shader = VERTEX_SHADER_IDS[vs_name] ?? 0;
+
+			const ps_name = ShaderMapper.getPixelShader(texture_count, tex_unit.shaderID);
+			pixel_shader = PIXEL_SHADER_IDS[ps_name] ?? 0;
+
+			const mat = m2.materials?.[tex_unit.materialIndex];
+			if (mat) {
+				blend_mode = M2BLEND_TO_EGX[mat.blendingMode] ?? mat.blendingMode;
+				flags = mat.flags;
+			}
+		}
+
+		draw_calls.push({
+			start: submesh.triangleStart,
+			count: submesh.triangleCount,
+			vertex_shader,
+			pixel_shader,
+			blend_mode,
+			flags,
+			tex_file_ids,
+			tex_flags
+		});
+	}
+
+	// sort: opaque/alpha_key first, then transparent by blend mode
+	draw_calls.sort((a, b) => {
+		const a_opaque = a.blend_mode <= 1 ? 0 : 1;
+		const b_opaque = b.blend_mode <= 1 ? 0 : 1;
+		if (a_opaque !== b_opaque)
+			return a_opaque - b_opaque;
+
+		return a.blend_mode - b.blend_mode;
+	});
+
+	return draw_calls;
+}
+
 class M2Renderer {
 	constructor(gl_context) {
 		this.ctx = gl_context;
@@ -114,6 +265,7 @@ class M2Renderer {
 
 		this._model_cache = new Map();
 		this._tile_data = new Map();
+		this._texture_cache = new Map();
 
 		this._obj0_load_queue = [];
 		this._obj0_loading = new Set();
@@ -127,6 +279,14 @@ class M2Renderer {
 		this._last_cam = new Float32Array(3);
 		this._instances_dirty = false;
 		this._disposed = false;
+
+		this._default_texture = this._create_default_texture();
+	}
+
+	_create_default_texture() {
+		const tex = new GLTexture(this.ctx);
+		tex.set_rgba(new Uint8Array([255, 255, 255, 255]), 1, 1, { has_alpha: false });
+		return tex;
 	}
 
 	get model_count() {
@@ -227,6 +387,7 @@ class M2Renderer {
 			return 0;
 
 		const gl = this.gl;
+		const ctx = this.ctx;
 		const shader = this.shader;
 
 		shader.use();
@@ -235,6 +396,13 @@ class M2Renderer {
 		shader.set_uniform_3fv('u_light_dir', light_dir);
 		shader.set_uniform_3fv('u_sun_color', sun_color);
 		shader.set_uniform_1f('u_sun_intensity', sun_intensity);
+		shader.set_uniform_1f('u_alpha_test', ALPHA_TEST_VALUE);
+		shader.set_uniform_4f('u_mesh_color', 1, 1, 1, 1);
+
+		shader.set_uniform_1i('u_texture1', 0);
+		shader.set_uniform_1i('u_texture2', 1);
+		shader.set_uniform_1i('u_texture3', 2);
+		shader.set_uniform_1i('u_texture4', 3);
 
 		if (fog_params) {
 			shader.set_uniform_3fv('u_camera_pos', fog_params.camera_pos);
@@ -253,9 +421,50 @@ class M2Renderer {
 				continue;
 
 			entry.vao.bind();
-			gl.drawElementsInstanced(gl.TRIANGLES, entry.index_count, entry.vao.index_type, 0, entry.instance_count);
+
+			for (const dc of entry.draw_calls) {
+				shader.set_uniform_1i('u_vertex_shader', dc.vertex_shader);
+				shader.set_uniform_1i('u_pixel_shader', dc.pixel_shader);
+				shader.set_uniform_1i('u_blend_mode', dc.blend_mode);
+				shader.set_uniform_1i('u_apply_lighting', (dc.flags & 0x1) ? 0 : 1);
+
+				ctx.apply_blend_mode(dc.blend_mode);
+
+				if (dc.flags & 0x04) {
+					ctx.set_cull_face(false);
+				} else {
+					ctx.set_cull_face(true);
+					ctx.set_cull_mode(gl.BACK);
+				}
+
+				if (dc.flags & 0x08)
+					ctx.set_depth_test(false);
+				else
+					ctx.set_depth_test(true);
+
+				if (dc.flags & 0x10)
+					ctx.set_depth_write(false);
+				else
+					ctx.set_depth_write(true);
+
+				for (let t = 0; t < 4; t++) {
+					const file_id = dc.tex_file_ids[t];
+					const cached = file_id > 0 ? this._texture_cache.get(file_id) : null;
+					const tex = cached?.texture ?? this._default_texture;
+					tex.bind(t);
+				}
+
+				gl.drawElementsInstanced(gl.TRIANGLES, dc.count, entry.vao.index_type, dc.start * 2, entry.instance_count);
+			}
+
 			drawn += entry.instance_count;
 		}
+
+		// reset state
+		ctx.set_blend(false);
+		ctx.set_depth_test(true);
+		ctx.set_depth_write(true);
+		ctx.set_cull_face(false);
 
 		return drawn;
 	}
@@ -370,6 +579,8 @@ class M2Renderer {
 					entry = {
 						vao: null,
 						index_count: 0,
+						draw_calls: null,
+						texture_ids: null,
 						instance_buffer: null,
 						instance_count: 0,
 						ref_count: 0,
@@ -448,7 +659,37 @@ class M2Renderer {
 				return;
 			}
 
-			this._upload_queue.push({ file_data_id, ...geo });
+			const draw_calls = build_draw_calls(m2, skin);
+
+			// collect unique textures and fetch BLP data
+			const texture_loads = new Map();
+			for (const dc of draw_calls) {
+				for (let j = 0; j < 4; j++) {
+					const fid = dc.tex_file_ids[j];
+					if (fid > 0 && !texture_loads.has(fid) && !this._texture_cache.has(fid))
+						texture_loads.set(fid, { flags: dc.tex_flags[j], blp: null });
+				}
+			}
+
+			// fetch and parse BLP files
+			for (const [fid, entry] of texture_loads) {
+				if (this._disposed || !this._model_cache.has(file_data_id))
+					break;
+
+				try {
+					const data = await this._casc.getFile(fid);
+					entry.blp = new BLPFile(data);
+				} catch (e) {
+					log.write('Failed to load M2 texture ' + fid + ': ' + e.message);
+				}
+			}
+
+			if (this._disposed || !this._model_cache.has(file_data_id)) {
+				this._model_loading.delete(file_data_id);
+				return;
+			}
+
+			this._upload_queue.push({ file_data_id, draw_calls, texture_loads, ...geo });
 		} catch (e) {
 			log.write('Failed to load M2 model ' + file_data_id + ': ' + e.message);
 		}
@@ -506,8 +747,42 @@ class M2Renderer {
 			gl.vertexAttribDivisor(loc, 1);
 		}
 
+		// upload textures to GPU
+		const texture_ids = new Set();
+		for (const [fid, tex_load] of data.texture_loads) {
+			texture_ids.add(fid);
+
+			let cached = this._texture_cache.get(fid);
+			if (cached) {
+				cached.ref_count++;
+			} else {
+				const gl_tex = new GLTexture(this.ctx);
+				if (tex_load.blp)
+					gl_tex.set_blp(tex_load.blp, { flags: tex_load.flags });
+
+				cached = { texture: gl_tex, ref_count: 1 };
+				this._texture_cache.set(fid, cached);
+			}
+		}
+
+		// ref-count textures already in cache (from other models)
+		for (const dc of data.draw_calls) {
+			for (let j = 0; j < 4; j++) {
+				const fid = dc.tex_file_ids[j];
+				if (fid > 0 && !texture_ids.has(fid)) {
+					const cached = this._texture_cache.get(fid);
+					if (cached) {
+						cached.ref_count++;
+						texture_ids.add(fid);
+					}
+				}
+			}
+		}
+
 		entry.vao = vao;
 		entry.index_count = data.index_count;
+		entry.draw_calls = data.draw_calls;
+		entry.texture_ids = texture_ids;
 		entry.instance_buffer = instance_buffer;
 		entry.queued = false;
 	}
@@ -578,10 +853,29 @@ class M2Renderer {
 		}
 	}
 
+	_release_textures(texture_ids) {
+		if (!texture_ids)
+			return;
+
+		for (const fid of texture_ids) {
+			const cached = this._texture_cache.get(fid);
+			if (!cached)
+				continue;
+
+			cached.ref_count--;
+			if (cached.ref_count <= 0) {
+				cached.texture.dispose();
+				this._texture_cache.delete(fid);
+			}
+		}
+	}
+
 	_dispose_model(file_data_id) {
 		const entry = this._model_cache.get(file_data_id);
 		if (!entry)
 			return;
+
+		this._release_textures(entry.texture_ids);
 
 		if (entry.vao)
 			entry.vao.dispose();
@@ -606,6 +900,17 @@ class M2Renderer {
 
 		this._model_cache.clear();
 		this._tile_data.clear();
+
+		// dispose remaining cached textures
+		for (const cached of this._texture_cache.values())
+			cached.texture.dispose();
+
+		this._texture_cache.clear();
+
+		if (this._default_texture) {
+			this._default_texture.dispose();
+			this._default_texture = null;
+		}
 
 		if (this.shader) {
 			Shaders.unregister(this.shader);
