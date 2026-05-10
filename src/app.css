@@ -4236,3 +4236,25 @@ input[type=number]::-webkit-outer-spin-button {
 	color: rgba(255, 255, 255, 0.6);
 	margin-right: 4px;
 }
+
+.mv-selected-model {
+	margin-top: 6px;
+}
+
+.mv-go-to-model {
+	display: inline-block;
+	background: rgba(255, 255, 255, 0.1);
+	border: 1px solid rgba(255, 255, 255, 0.2);
+	border-radius: 3px;
+	padding: 1px 8px;
+	font-size: 11px;
+	color: rgba(255, 255, 255, 0.6);
+	cursor: pointer;
+	pointer-events: auto;
+	margin-left: 6px;
+}
+
+.mv-go-to-model:hover {
+	background: rgba(255, 255, 255, 0.2);
+	color: rgba(255, 255, 255, 0.9);
+}

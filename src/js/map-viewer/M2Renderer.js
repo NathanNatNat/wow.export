@@ -26,6 +26,8 @@ const CAMERA_DIRTY_THRESHOLD_SQ = 33.33 * 33.33;
 const M2_VERTEX_STRIDE = 40;
 const ALPHA_TEST_VALUE = 0.501960814;
 
+const BBOX_COLOR = new Float32Array([1, 1, 1]);
+
 const VERTEX_SHADER_IDS = {
 	'Diffuse_T1': 0,
 	'Diffuse_Env': 1,
@@ -261,6 +263,7 @@ class M2Renderer {
 		this.ctx = gl_context;
 		this.gl = gl_context.gl;
 		this.shader = Shaders.create_program(gl_context, 'mpv_m2');
+		this.bbox_shader = Shaders.create_program(gl_context, 'mpv_terrain_wire');
 		this._casc = core.view.casc;
 
 		this._model_cache = new Map();
@@ -279,6 +282,10 @@ class M2Renderer {
 		this._last_cam = new Float32Array(3);
 		this._instances_dirty = false;
 		this._disposed = false;
+
+		this._selected_id = 0;
+		this._selected_instance = null;
+		this._bbox_vao = null;
 
 		this._default_texture = this._create_default_texture();
 	}
@@ -585,6 +592,7 @@ class M2Renderer {
 						instance_count: 0,
 						ref_count: 0,
 						tile_instances: new Map(),
+						bounding_box: null,
 						queued: false
 					};
 					this._model_cache.set(id, entry);
@@ -689,7 +697,14 @@ class M2Renderer {
 				return;
 			}
 
-			this._upload_queue.push({ file_data_id, draw_calls, texture_loads, ...geo });
+			// swizzle bounding box from M2 coords [X, Y, Z] to viewer coords [X, Z, -Y]
+			const raw_bb = m2.boundingBox ?? null;
+			const bounding_box = raw_bb ? {
+				min: [raw_bb.min[0], raw_bb.min[2], -raw_bb.max[1]],
+				max: [raw_bb.max[0], raw_bb.max[2], -raw_bb.min[1]]
+			} : null;
+
+			this._upload_queue.push({ file_data_id, draw_calls, texture_loads, bounding_box, ...geo });
 		} catch (e) {
 			log.write('Failed to load M2 model ' + file_data_id + ': ' + e.message);
 		}
@@ -784,6 +799,7 @@ class M2Renderer {
 		entry.draw_calls = data.draw_calls;
 		entry.texture_ids = texture_ids;
 		entry.instance_buffer = instance_buffer;
+		entry.bounding_box = data.bounding_box;
 		entry.queued = false;
 	}
 
@@ -875,6 +891,9 @@ class M2Renderer {
 		if (!entry)
 			return;
 
+		if (this._selected_id === file_data_id)
+			this.deselect();
+
 		this._release_textures(entry.texture_ids);
 
 		if (entry.vao)
@@ -884,6 +903,225 @@ class M2Renderer {
 			this.gl.deleteBuffer(entry.instance_buffer);
 
 		this._model_cache.delete(file_data_id);
+	}
+
+	get selected_id() {
+		return this._selected_id;
+	}
+
+	get selected_instance() {
+		return this._selected_instance;
+	}
+
+	pick(ray_origin, ray_dir) {
+		let best_t = Infinity;
+		let best_id = 0;
+		let best_inst = null;
+		const rd_sq = this.render_distance * this.render_distance;
+
+		for (const [id, entry] of this._model_cache) {
+			if (!entry.vao || !entry.bounding_box)
+				continue;
+
+			const bb = entry.bounding_box;
+
+			for (const instances of entry.tile_instances.values()) {
+				for (const inst of instances) {
+					const dx = inst.world_pos[0] - this._last_cam[0];
+					const dy = inst.world_pos[1] - this._last_cam[1];
+					const dz = inst.world_pos[2] - this._last_cam[2];
+
+					if (dx * dx + dy * dy + dz * dz > rd_sq)
+						continue;
+
+					const t = this._ray_aabb_test(ray_origin, ray_dir, bb, inst.matrix);
+					if (t >= 0 && t < best_t) {
+						best_t = t;
+						best_id = id;
+						best_inst = inst;
+					}
+				}
+			}
+		}
+
+		if (best_inst) {
+			this._selected_id = best_id;
+			this._selected_instance = best_inst;
+			this._update_bbox_vao();
+			return { file_data_id: best_id, instance: best_inst };
+		}
+
+		return null;
+	}
+
+	select(file_data_id, instance) {
+		this._selected_id = file_data_id;
+		this._selected_instance = instance;
+		this._update_bbox_vao();
+	}
+
+	deselect() {
+		this._selected_id = 0;
+		this._selected_instance = null;
+	}
+
+	// ray-AABB intersection in model space via inverse transform
+	_ray_aabb_test(ray_origin, ray_dir, bb, matrix) {
+		// invert the 3x3 rotation+scale part and translation
+		const m = matrix;
+		const m00 = m[0], m01 = m[4], m02 = m[8],  tx = m[12];
+		const m10 = m[1], m11 = m[5], m12 = m[9],  ty = m[13];
+		const m20 = m[2], m21 = m[6], m22 = m[10], tz = m[14];
+
+		// cofactor matrix for 3x3 inverse
+		const c00 = m11 * m22 - m12 * m21;
+		const c01 = m12 * m20 - m10 * m22;
+		const c02 = m10 * m21 - m11 * m20;
+		const c10 = m02 * m21 - m01 * m22;
+		const c11 = m00 * m22 - m02 * m20;
+		const c12 = m01 * m20 - m00 * m21;
+		const c20 = m01 * m12 - m02 * m11;
+		const c21 = m02 * m10 - m00 * m12;
+		const c22 = m00 * m11 - m01 * m10;
+
+		const det = m00 * c00 + m01 * c01 + m02 * c02;
+		if (Math.abs(det) < 1e-12)
+			return -1;
+
+		const inv_det = 1.0 / det;
+
+		// transform ray origin to local space
+		const ox = ray_origin[0] - tx;
+		const oy = ray_origin[1] - ty;
+		const oz = ray_origin[2] - tz;
+
+		const lo_x = (c00 * ox + c10 * oy + c20 * oz) * inv_det;
+		const lo_y = (c01 * ox + c11 * oy + c21 * oz) * inv_det;
+		const lo_z = (c02 * ox + c12 * oy + c22 * oz) * inv_det;
+
+		const ld_x = (c00 * ray_dir[0] + c10 * ray_dir[1] + c20 * ray_dir[2]) * inv_det;
+		const ld_y = (c01 * ray_dir[0] + c11 * ray_dir[1] + c21 * ray_dir[2]) * inv_det;
+		const ld_z = (c02 * ray_dir[0] + c12 * ray_dir[1] + c22 * ray_dir[2]) * inv_det;
+
+		// slab method
+		const min = bb.min, max = bb.max;
+		let tmin = -Infinity, tmax = Infinity;
+
+		if (Math.abs(ld_x) > 1e-12) {
+			const t1 = (min[0] - lo_x) / ld_x;
+			const t2 = (max[0] - lo_x) / ld_x;
+			tmin = Math.max(tmin, Math.min(t1, t2));
+			tmax = Math.min(tmax, Math.max(t1, t2));
+		} else if (lo_x < min[0] || lo_x > max[0]) {
+			return -1;
+		}
+
+		if (Math.abs(ld_y) > 1e-12) {
+			const t1 = (min[1] - lo_y) / ld_y;
+			const t2 = (max[1] - lo_y) / ld_y;
+			tmin = Math.max(tmin, Math.min(t1, t2));
+			tmax = Math.min(tmax, Math.max(t1, t2));
+		} else if (lo_y < min[1] || lo_y > max[1]) {
+			return -1;
+		}
+
+		if (Math.abs(ld_z) > 1e-12) {
+			const t1 = (min[2] - lo_z) / ld_z;
+			const t2 = (max[2] - lo_z) / ld_z;
+			tmin = Math.max(tmin, Math.min(t1, t2));
+			tmax = Math.min(tmax, Math.max(t1, t2));
+		} else if (lo_z < min[2] || lo_z > max[2]) {
+			return -1;
+		}
+
+		if (tmax < 0 || tmin > tmax)
+			return -1;
+
+		return tmin >= 0 ? tmin : tmax;
+	}
+
+	_update_bbox_vao() {
+		const entry = this._model_cache.get(this._selected_id);
+		if (!entry?.bounding_box || !this._selected_instance)
+			return;
+
+		const bb = entry.bounding_box;
+		const m = this._selected_instance.matrix;
+		const min = bb.min, max = bb.max;
+
+		// 8 corners of AABB in local space
+		const corners = [
+			[min[0], min[1], min[2]],
+			[max[0], min[1], min[2]],
+			[max[0], max[1], min[2]],
+			[min[0], max[1], min[2]],
+			[min[0], min[1], max[2]],
+			[max[0], min[1], max[2]],
+			[max[0], max[1], max[2]],
+			[min[0], max[1], max[2]]
+		];
+
+		// transform corners to world space
+		const world = corners.map(c => {
+			const x = m[0] * c[0] + m[4] * c[1] + m[8]  * c[2] + m[12];
+			const y = m[1] * c[0] + m[5] * c[1] + m[9]  * c[2] + m[13];
+			const z = m[2] * c[0] + m[6] * c[1] + m[10] * c[2] + m[14];
+			return [x, y, z];
+		});
+
+		// 12 edges of a box: pairs of corner indices
+		const edges = [
+			0, 1, 1, 2, 2, 3, 3, 0,
+			4, 5, 5, 6, 6, 7, 7, 4,
+			0, 4, 1, 5, 2, 6, 3, 7
+		];
+
+		const positions = new Float32Array(edges.length * 3);
+		for (let i = 0; i < edges.length; i++) {
+			const c = world[edges[i]];
+			positions[i * 3] = c[0];
+			positions[i * 3 + 1] = c[1];
+			positions[i * 3 + 2] = c[2];
+		}
+
+		const gl = this.gl;
+
+		if (!this._bbox_vao) {
+			this._bbox_vao = new VertexArray(this.ctx);
+			this._bbox_vao.bind();
+			this._bbox_vao.vbo = gl.createBuffer();
+			gl.bindBuffer(gl.ARRAY_BUFFER, this._bbox_vao.vbo);
+			gl.enableVertexAttribArray(0);
+			gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
+		} else {
+			this._bbox_vao.bind();
+			gl.bindBuffer(gl.ARRAY_BUFFER, this._bbox_vao.vbo);
+		}
+
+		gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
+	}
+
+	render_selection(view_matrix, projection_matrix) {
+		if (!this._selected_id || !this._selected_instance || !this._bbox_vao)
+			return;
+
+		if (!this.bbox_shader.is_valid())
+			return;
+
+		const gl = this.gl;
+
+		this.bbox_shader.use();
+		this.bbox_shader.set_uniform_mat4('u_view', false, view_matrix);
+		this.bbox_shader.set_uniform_mat4('u_projection', false, projection_matrix);
+		this.bbox_shader.set_uniform_3fv('u_terrain_color', BBOX_COLOR);
+
+		this.ctx.set_depth_test(true);
+		this.ctx.set_depth_write(false);
+
+		this._bbox_vao.bind();
+		gl.drawArrays(gl.LINES, 0, 24);
+
+		this.ctx.set_depth_write(true);
 	}
 
 	dispose() {
@@ -912,10 +1150,21 @@ class M2Renderer {
 			this._default_texture = null;
 		}
 
+		if (this._bbox_vao) {
+			this._bbox_vao.dispose();
+			this._bbox_vao = null;
+		}
+
 		if (this.shader) {
 			Shaders.unregister(this.shader);
 			this.shader.dispose();
 			this.shader = null;
+		}
+
+		if (this.bbox_shader) {
+			Shaders.unregister(this.bbox_shader);
+			this.bbox_shader.dispose();
+			this.bbox_shader = null;
 		}
 	}
 }

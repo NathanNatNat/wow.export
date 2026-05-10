@@ -1,5 +1,6 @@
 const core = require('../core');
 const constants = require('../constants');
+const listfile = require('../casc/listfile');
 const GLContext = require('../3D/gl/GLContext');
 const PerspectiveCamera = require('./PerspectiveCamera');
 const FreeCameraControls = require('./FreeCameraControls');
@@ -17,7 +18,8 @@ const SECTIONS = [
 		label: 'Interface',
 		controls: [
 			{ type: 'checkbox', key: 'mapViewerShowStats', label: 'Show Technical Stats' },
-			{ type: 'checkbox', key: 'mapViewerShowMinimap', label: 'Show Minimap' }
+			{ type: 'checkbox', key: 'mapViewerShowMinimap', label: 'Show Minimap' },
+			{ type: 'checkbox', key: 'mapViewerAllowModelSelection', label: 'Allow Model Selection' }
 		]
 	},
 	{
@@ -90,6 +92,7 @@ module.exports = {
 					<span v-if="map_info" class="map-viewer-status">{{ map_info }}</span>
 					<span class="map-viewer-status">{{ status_text }}</span>
 					<span v-if="coord_text" class="map-viewer-status">{{ coord_text }}</span>
+					<span v-if="selected_model" class="map-viewer-status mv-selected-model">Selected: {{ selected_model.path }} [{{ selected_model.id }}] <span class="mv-go-to-model" @click="go_to_model">Go to Model</span></span>
 				</div>
 			</div>
 			<div class="mv-panel">
@@ -159,6 +162,7 @@ module.exports = {
 			status_text: 'Initializing...',
 			map_info: null,
 			coord_text: null,
+			selected_model: null,
 			show_ui: true,
 			open_section: null,
 			sections: SECTIONS,
@@ -286,6 +290,8 @@ module.exports = {
 		document.addEventListener('keydown', this._key_handler);
 
 		await this._init_terrain();
+
+		this._controls.on_click = (cx, cy) => this._on_canvas_click(cx, cy);
 	},
 
 	beforeUnmount() {
@@ -427,6 +433,8 @@ module.exports = {
 							fog_params
 						);
 						this._gl_ctx.set_depth_test(true);
+
+						this._m2_renderer.render_selection(this._camera.view_matrix, this._camera.projection_matrix);
 					}
 
 					const loaded = this._terrain.tile_count;
@@ -559,6 +567,67 @@ module.exports = {
 				this._minimap.dispose();
 				this._minimap = null;
 			}
+		},
+
+		_on_canvas_click(cx, cy) {
+			if (!this._m2_renderer || !core.view.config.mapViewerAllowModelSelection)
+				return;
+
+			const canvas = this.$refs.canvas;
+			const rect = canvas.getBoundingClientRect();
+
+			// normalized device coords [-1, 1]
+			const ndc_x = ((cx - rect.left) / rect.width) * 2 - 1;
+			const ndc_y = 1 - ((cy - rect.top) / rect.height) * 2;
+
+			const ray = this._unproject_ray(ndc_x, ndc_y);
+			const hit = this._m2_renderer.pick(ray.origin, ray.dir);
+
+			if (hit) {
+				const filename = listfile.getByIDOrUnknown(hit.file_data_id);
+				this.selected_model = { id: hit.file_data_id, path: filename };
+			} else {
+				this.selected_model = null;
+				this._m2_renderer.deselect();
+			}
+		},
+
+		_unproject_ray(ndc_x, ndc_y) {
+			const proj = this._camera.projection_matrix;
+			const view = this._camera.view_matrix;
+
+			// invert projection (only diagonal elements needed for direction)
+			const eye_x = ndc_x / proj[0];
+			const eye_y = ndc_y / proj[5];
+			const eye_z = -1;
+
+			// invert view matrix: transpose the 3x3 rotation part (multiply by columns)
+			const dx = view[0] * eye_x + view[1] * eye_y + view[2] * eye_z;
+			const dy = view[4] * eye_x + view[5] * eye_y + view[6] * eye_z;
+			const dz = view[8] * eye_x + view[9] * eye_y + view[10] * eye_z;
+
+			const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+			return {
+				origin: this._camera.position,
+				dir: [dx / len, dy / len, dz / len]
+			};
+		},
+
+		go_to_model() {
+			if (!this.selected_model)
+				return;
+
+			const file_data_id = this.selected_model.id;
+			const entry = listfile.getByIDOrUnknown(file_data_id);
+
+			core.view.mapViewerActive = false;
+			require('../modules').tab_models.setActive();
+
+			core.view.userInputFilterModels = '';
+			core.view.overrideModelList = [entry];
+			core.view.selectionModels = [entry];
+			core.view.overrideModelName = null;
 		},
 
 		_cleanup() {

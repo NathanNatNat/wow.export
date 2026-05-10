@@ -11,6 +11,7 @@ const SPEED_SLOW_MULT = 0.2;
 const MOUSE_SENSITIVITY = 0.003;
 const SCROLL_SPEED = 150;
 const PITCH_LIMIT = Math.PI / 2 - 0.01;
+const CLICK_THRESHOLD = 3;
 
 class FreeCameraControls {
 	constructor(camera, dom_element, get_speed) {
@@ -21,10 +22,14 @@ class FreeCameraControls {
 		this.yaw = 0;
 		this.pitch = -0.4;
 
+		this.on_click = null;
+
 		this._keys = new Set();
 		this._is_dragging = false;
 		this._last_mouse_x = 0;
 		this._last_mouse_y = 0;
+		this._down_mouse_x = 0;
+		this._down_mouse_y = 0;
 		this._shift = false;
 		this._alt = false;
 
@@ -54,6 +59,8 @@ class FreeCameraControls {
 		this._is_dragging = true;
 		this._last_mouse_x = e.clientX;
 		this._last_mouse_y = e.clientY;
+		this._down_mouse_x = e.clientX;
+		this._down_mouse_y = e.clientY;
 	}
 
 	_on_mouse_move(e) {
@@ -70,7 +77,15 @@ class FreeCameraControls {
 		this.pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, this.pitch));
 	}
 
-	_on_mouse_up() {
+	_on_mouse_up(e) {
+		if (this._is_dragging) {
+			const dx = e.clientX - this._down_mouse_x;
+			const dy = e.clientY - this._down_mouse_y;
+
+			if (Math.abs(dx) < CLICK_THRESHOLD && Math.abs(dy) < CLICK_THRESHOLD && this.on_click)
+				this.on_click(e.clientX, e.clientY);
+		}
+
 		this._is_dragging = false;
 	}
 
