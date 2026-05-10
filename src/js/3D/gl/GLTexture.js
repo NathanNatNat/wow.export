@@ -157,9 +157,15 @@ class GLTexture {
 
 		// prefer compressed GPU upload when S3TC is available
 		if (blp.encoding === 2 && this.ctx.ext_s3tc) {
-			const format = blp.alphaDepth > 1
-				? (blp.alphaEncoding === 7 ? GLTexture.DXT5 : GLTexture.DXT3)
-				: (this.has_alpha ? GLTexture.DXT1_RGBA : GLTexture.DXT1_RGB);
+			let format;
+			if (blp.alphaEncoding === 7)
+				format = GLTexture.DXT5;
+			else if (blp.alphaEncoding === 1)
+				format = GLTexture.DXT3;
+			else if (blp.alphaDepth > 0)
+				format = GLTexture.DXT1_RGBA;
+			else
+				format = GLTexture.DXT1_RGB;
 
 			this.set_compressed(blp.get_raw_mipmaps(), format);
 			this._apply_wrap(wrap_s, wrap_t);
