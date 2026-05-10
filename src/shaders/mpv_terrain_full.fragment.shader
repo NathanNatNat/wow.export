@@ -29,16 +29,10 @@ uniform float u_layer_scale[8];
 uniform float u_height_scale[8];
 uniform float u_height_offset[8];
 
-uniform vec3 u_light_dir;
-uniform vec3 u_sun_color;
-uniform float u_sun_intensity;
 uniform vec3 u_camera_pos;
 
+#include "mpv_light.inc.glsl"
 #include "mpv_fog.inc.glsl"
-
-const vec3 SKY_COLOR = vec3(0.4, 0.5, 0.7);
-const vec3 GROUND_COLOR = vec3(0.25, 0.2, 0.15);
-const float AMBIENT = 0.25;
 
 vec4 sample_slot(int slot, vec2 uv) {
 	switch (slot) {
@@ -114,12 +108,7 @@ void main() {
 	terrain_color *= v_color.rgb * 2.0;
 
 	vec3 n = normalize(v_normal);
-	float sky_factor = 0.5 + 0.5 * n.y;
-	vec3 ambient = mix(GROUND_COLOR, SKY_COLOR, sky_factor) * AMBIENT;
-	float diffuse = max(dot(n, u_light_dir), 0.0);
-	vec3 color = terrain_color * (ambient + u_sun_color * diffuse * u_sun_intensity);
-
+	vec3 color = calc_exterior_light(terrain_color, n);
 	color = apply_fog(color, v_position, u_camera_pos);
-
 	frag_color = vec4(color, 1.0);
 }

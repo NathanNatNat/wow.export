@@ -465,11 +465,12 @@ module.exports = {
 					if (this.show_adt_bounds)
 						this._terrain.render_grid(this._camera.view_matrix, this._camera.projection_matrix, GRID_COLOR);
 
-					// build shared fog params for sub-renderers
-					const fog_params = this._terrain.fog_enabled && this._terrain.fog_uniforms ? {
+					// build shared scene params for sub-renderers
+					const scene_params = {
 						camera_pos: this._terrain.camera_pos,
-						fog_uniforms: this._terrain.fog_uniforms
-					} : null;
+						light_uniforms: this._terrain.light_uniforms,
+						fog_uniforms: this._terrain.fog_enabled ? this._terrain.fog_uniforms : null
+					};
 
 					// liquids
 					let liquid_drawn = 0;
@@ -478,8 +479,7 @@ module.exports = {
 
 						liquid_drawn = this._liquid_renderer.render(
 							this._camera.view_matrix, this._camera.projection_matrix,
-							this._terrain.light_dir, this._terrain.sun_color, this._terrain.sun_intensity,
-							fog_params
+							scene_params
 						);
 						this._gl_ctx.set_depth_test(true);
 					}
@@ -491,8 +491,7 @@ module.exports = {
 
 						wmo_drawn = this._wmo_renderer.render(
 							this._camera.view_matrix, this._camera.projection_matrix,
-							this._terrain.light_dir, this._terrain.sun_color, this._terrain.sun_intensity,
-							fog_params
+							scene_params
 						);
 						this._gl_ctx.set_depth_test(true);
 
@@ -506,8 +505,7 @@ module.exports = {
 
 						m2_drawn = this._m2_renderer.render(
 							this._camera.view_matrix, this._camera.projection_matrix,
-							this._terrain.light_dir, this._terrain.sun_color, this._terrain.sun_intensity,
-							fog_params
+							scene_params
 						);
 						this._gl_ctx.set_depth_test(true);
 
@@ -614,10 +612,9 @@ module.exports = {
 				// sky renderer
 				this._sky_renderer = new SkyRenderer(this._gl_ctx);
 
-				// fog/sky data provider (shared DB2 tables)
+				// fog/sky/lighting data provider (shared DB2 tables)
 				this._fog_provider = new FogDataProvider(map_id);
-				if (core.view.config.mapViewerFogEnabled || core.view.config.mapViewerEnableSkybox)
-					this._fog_provider.load();
+				this._fog_provider.load();
 
 				this._apply_sun_settings();
 				this._position_camera();
@@ -648,20 +645,21 @@ module.exports = {
 			const needs_fog = this._terrain.fog_enabled;
 			const needs_sky = this.config.mapViewerEnableSkybox;
 
-			if (!this._fog_provider || (!needs_fog && !needs_sky))
-				return;
-
-			if (!this._fog_provider.loaded)
+			if (!this._fog_provider || !this._fog_provider.loaded)
 				return;
 
 			this._fog_provider.time_of_day = this.time_of_day;
 			this._fog_provider.update(cam);
 
+			// always apply DB2-driven lighting
+			this._terrain.light_uniforms = this._fog_provider.light_uniforms;
+
+			// inject sun direction from lighting into fog uniforms
+			const light_dir = this._fog_provider.light_uniforms.light_dir;
+
 			if (needs_fog) {
 				const uniforms = this._fog_provider.fog_uniforms;
 
-				// inject sun direction into fog uniforms
-				const light_dir = this._terrain.light_dir;
 				uniforms.sun_dir_z_scalar[0] = light_dir[0];
 				uniforms.sun_dir_z_scalar[1] = light_dir[1];
 				uniforms.sun_dir_z_scalar[2] = light_dir[2];

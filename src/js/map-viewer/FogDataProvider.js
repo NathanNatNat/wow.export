@@ -23,6 +23,7 @@ class FogDataProvider {
 		this._last_time = -1;
 		this._fog_uniforms = create_default_uniforms();
 		this._sky_colors = create_default_sky_colors();
+		this._light_uniforms = create_default_light_uniforms();
 
 		// public state
 		this.time_of_day = 720; // noon (0-2880, half-minutes)
@@ -38,6 +39,10 @@ class FogDataProvider {
 
 	get sky_colors() {
 		return this._sky_colors;
+	}
+
+	get light_uniforms() {
+		return this._light_uniforms;
 	}
 
 	async load() {
@@ -188,12 +193,14 @@ class FogDataProvider {
 		if (blends.length === 0) {
 			this._fog_uniforms = create_default_uniforms();
 			this._sky_colors = create_default_sky_colors();
+			this._light_uniforms = create_default_light_uniforms();
 			return;
 		}
 
-		// compute fog + sky result for each blend, then combine
+		// compute fog + sky + lighting result for each blend, then combine
 		let result = null;
 		let sky_result = null;
+		let light_result = null;
 		for (const { light_param_id, blend } of blends) {
 			if (light_param_id <= 0)
 				continue;
@@ -205,20 +212,24 @@ class FogDataProvider {
 			if (!result) {
 				result = scale_fog_result(fog, blend);
 				sky_result = scale_sky_colors(fog.sky_colors, blend);
+				light_result = scale_light_colors(fog.light_colors, blend);
 			} else {
 				add_scaled_fog_result(result, fog, blend);
 				add_scaled_sky_colors(sky_result, fog.sky_colors, blend);
+				add_scaled_light_colors(light_result, fog.light_colors, blend);
 			}
 		}
 
 		if (!result) {
 			this._fog_uniforms = create_default_uniforms();
 			this._sky_colors = create_default_sky_colors();
+			this._light_uniforms = create_default_light_uniforms();
 			return;
 		}
 
 		this._fog_uniforms = fog_result_to_uniforms(result);
 		this._sky_colors = sky_result;
+		this._light_uniforms = light_colors_to_uniforms(light_result, time);
 	}
 
 	_calculate_light_blends(wow_x, wow_y, wow_z) {
@@ -396,8 +407,16 @@ function interpolate_light_data(a, b, t) {
 		lerp_color('SkyFogColor')
 	];
 
+	const light_colors = {
+		ambient: lerp_color('AmbientColor'),
+		horizon_ambient: lerp_color('HorizonAmbientColor'),
+		ground_ambient: lerp_color('GroundAmbientColor'),
+		direct: lerp_color('DirectColor')
+	};
+
 	return {
 		sky_colors,
+		light_colors,
 		fog_start,
 		fog_end: Math.max(fog_end, 10),
 		fog_density,
@@ -462,10 +481,12 @@ function lerp_int_color(a, b, t) {
 	];
 }
 
+const FOG_RESULT_SKIP_KEYS = new Set(['sky_colors', 'light_colors']);
+
 function scale_fog_result(fog, scale) {
 	const result = {};
 	for (const key of Object.keys(fog)) {
-		if (key === 'sky_colors')
+		if (FOG_RESULT_SKIP_KEYS.has(key))
 			continue;
 
 		const val = fog[key];
@@ -481,7 +502,7 @@ function scale_fog_result(fog, scale) {
 
 function add_scaled_fog_result(dest, src, scale) {
 	for (const key of Object.keys(src)) {
-		if (key === 'sky_colors')
+		if (FOG_RESULT_SKIP_KEYS.has(key))
 			continue;
 
 		const val = src[key];
@@ -605,6 +626,55 @@ function point_to_segment_dist(px, py, ax, ay, bx, by) {
 	const proj_x = ax + t * dx;
 	const proj_y = ay + t * dy;
 	return Math.sqrt((px - proj_x) * (px - proj_x) + (py - proj_y) * (py - proj_y));
+}
+
+function scale_light_colors(colors, scale) {
+	return {
+		ambient: colors.ambient.map(v => v * scale),
+		horizon_ambient: colors.horizon_ambient.map(v => v * scale),
+		ground_ambient: colors.ground_ambient.map(v => v * scale),
+		direct: colors.direct.map(v => v * scale)
+	};
+}
+
+function add_scaled_light_colors(dest, src, scale) {
+	for (const key of ['ambient', 'horizon_ambient', 'ground_ambient', 'direct']) {
+		for (let i = 0; i < 3; i++)
+			dest[key][i] += src[key][i] * scale;
+	}
+}
+
+function compute_sun_dir_from_time(time) {
+	// time 0=midnight, 720=6am, 1440=noon, 2160=6pm, 2880=midnight
+	const day_angle = (time / 2880) * 2 * Math.PI;
+	const elevation = -Math.cos(day_angle) * (Math.PI / 2);
+	const azimuth = Math.PI * 0.25;
+	const cos_el = Math.cos(elevation);
+	return new Float32Array([
+		cos_el * Math.sin(azimuth),
+		Math.sin(elevation),
+		cos_el * Math.cos(azimuth)
+	]);
+}
+
+function light_colors_to_uniforms(colors, time) {
+	return {
+		light_dir: compute_sun_dir_from_time(time),
+		ambient_color: new Float32Array(colors.ambient),
+		horizon_ambient_color: new Float32Array(colors.horizon_ambient),
+		ground_ambient_color: new Float32Array(colors.ground_ambient),
+		direct_color: new Float32Array(colors.direct)
+	};
+}
+
+function create_default_light_uniforms() {
+	return {
+		light_dir: new Float32Array([-0.4394, 0.8192, 0.3687]),
+		ambient_color: new Float32Array([0.5, 0.5, 0.5]),
+		horizon_ambient_color: new Float32Array([0.5, 0.5, 0.5]),
+		ground_ambient_color: new Float32Array([0.35, 0.3, 0.25]),
+		direct_color: new Float32Array([0.5, 0.475, 0.425])
+	};
 }
 
 module.exports = FogDataProvider;

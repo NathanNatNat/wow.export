@@ -72,6 +72,8 @@ class TerrainRenderer {
 		this.sun_color = new Float32Array([1.0, 0.95, 0.85]);
 		this.sun_intensity = 1.0;
 
+		this.light_uniforms = null;
+
 		this.fog_enabled = false;
 		this.fog_uniforms = null;
 		this.camera_pos = new Float32Array([0, 0, 0]);
@@ -1216,6 +1218,27 @@ class TerrainRenderer {
 		}
 	}
 
+	_set_light_uniforms(shader) {
+		const lu = this.light_uniforms;
+		if (lu) {
+			shader.set_uniform_3fv('u_light_dir', lu.light_dir);
+			shader.set_uniform_3fv('u_ambient_color', lu.ambient_color);
+			shader.set_uniform_3fv('u_horizon_ambient_color', lu.horizon_ambient_color);
+			shader.set_uniform_3fv('u_ground_ambient_color', lu.ground_ambient_color);
+			shader.set_uniform_3fv('u_direct_color', lu.direct_color);
+		} else {
+			shader.set_uniform_3fv('u_light_dir', this.light_dir);
+			shader.set_uniform_3fv('u_ambient_color', this.sun_color);
+			shader.set_uniform_3fv('u_horizon_ambient_color', this.sun_color);
+			shader.set_uniform_3fv('u_ground_ambient_color', new Float32Array([0.35, 0.3, 0.25]));
+			shader.set_uniform_3fv('u_direct_color', new Float32Array([
+				this.sun_color[0] * this.sun_intensity,
+				this.sun_color[1] * this.sun_intensity,
+				this.sun_color[2] * this.sun_intensity
+			]));
+		}
+	}
+
 	_set_fog_uniforms(shader) {
 		shader.set_uniform_3fv('u_camera_pos', this.camera_pos);
 
@@ -1257,9 +1280,7 @@ class TerrainRenderer {
 			this.minimap_shader.set_uniform_mat4('u_view', false, view_matrix);
 			this.minimap_shader.set_uniform_mat4('u_projection', false, projection_matrix);
 			this.minimap_shader.set_uniform_1i('u_minimap', 0);
-			this.minimap_shader.set_uniform_3fv('u_light_dir', this.light_dir);
-			this.minimap_shader.set_uniform_3fv('u_sun_color', this.sun_color);
-			this.minimap_shader.set_uniform_1f('u_sun_intensity', this.sun_intensity);
+			this._set_light_uniforms(this.minimap_shader);
 			this._set_fog_uniforms(this.minimap_shader);
 
 			for (const tile of this._tiles.values()) {
@@ -1326,9 +1347,7 @@ class TerrainRenderer {
 		shader.use();
 		shader.set_uniform_mat4('u_view', false, view_matrix);
 		shader.set_uniform_mat4('u_projection', false, projection_matrix);
-		shader.set_uniform_3fv('u_light_dir', this.light_dir);
-		shader.set_uniform_3fv('u_sun_color', this.sun_color);
-		shader.set_uniform_1f('u_sun_intensity', this.sun_intensity);
+		this._set_light_uniforms(shader);
 		this._set_fog_uniforms(shader);
 
 		for (let i = 0; i < 8; i++)
@@ -1395,9 +1414,7 @@ class TerrainRenderer {
 		this.shader.set_uniform_mat4('u_view', false, view_matrix);
 		this.shader.set_uniform_mat4('u_projection', false, projection_matrix);
 		this.shader.set_uniform_3fv('u_terrain_color', terrain_color);
-		this.shader.set_uniform_3fv('u_light_dir', this.light_dir);
-		this.shader.set_uniform_3fv('u_sun_color', this.sun_color);
-		this.shader.set_uniform_1f('u_sun_intensity', this.sun_intensity);
+		this._set_light_uniforms(this.shader);
 		this._set_fog_uniforms(this.shader);
 
 		this._compute_frustum(view_matrix, projection_matrix);
@@ -1475,9 +1492,7 @@ class TerrainRenderer {
 		this.minimap_shader.set_uniform_mat4('u_view', false, view_matrix);
 		this.minimap_shader.set_uniform_mat4('u_projection', false, projection_matrix);
 		this.minimap_shader.set_uniform_1i('u_minimap', 0);
-		this.minimap_shader.set_uniform_3fv('u_light_dir', this.light_dir);
-		this.minimap_shader.set_uniform_3fv('u_sun_color', this.sun_color);
-		this.minimap_shader.set_uniform_1f('u_sun_intensity', this.sun_intensity);
+		this._set_light_uniforms(this.minimap_shader);
 		this._set_fog_uniforms(this.minimap_shader);
 
 		this._compute_frustum(view_matrix, projection_matrix);
@@ -1507,9 +1522,7 @@ class TerrainRenderer {
 		this.minimap_shader.set_uniform_mat4('u_view', false, view_matrix);
 		this.minimap_shader.set_uniform_mat4('u_projection', false, projection_matrix);
 		this.minimap_shader.set_uniform_1i('u_minimap', 0);
-		this.minimap_shader.set_uniform_3fv('u_light_dir', this.light_dir);
-		this.minimap_shader.set_uniform_3fv('u_sun_color', this.sun_color);
-		this.minimap_shader.set_uniform_1f('u_sun_intensity', this.sun_intensity);
+		this._set_light_uniforms(this.minimap_shader);
 		this._set_fog_uniforms(this.minimap_shader);
 
 		this._compute_frustum(view_matrix, projection_matrix);

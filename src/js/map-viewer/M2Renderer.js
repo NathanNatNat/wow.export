@@ -33,6 +33,49 @@ const ANIM_STAND = 0;
 const ANIM_CLOSED = 147;
 
 const BBOX_COLOR = new Float32Array([1, 1, 1]);
+const DEFAULT_CAMERA_POS = new Float32Array(3);
+const DEFAULT_AMBIENT = new Float32Array([0.5, 0.5, 0.5]);
+const DEFAULT_GROUND = new Float32Array([0.35, 0.3, 0.25]);
+const DEFAULT_DIRECT = new Float32Array([0.5, 0.475, 0.425]);
+const DEFAULT_LIGHT_DIR = new Float32Array([-0.4394, 0.8192, 0.3687]);
+
+function set_scene_uniforms(shader, params) {
+	const lu = params?.light_uniforms;
+	if (lu) {
+		shader.set_uniform_3fv('u_light_dir', lu.light_dir);
+		shader.set_uniform_3fv('u_ambient_color', lu.ambient_color);
+		shader.set_uniform_3fv('u_horizon_ambient_color', lu.horizon_ambient_color);
+		shader.set_uniform_3fv('u_ground_ambient_color', lu.ground_ambient_color);
+		shader.set_uniform_3fv('u_direct_color', lu.direct_color);
+	} else {
+		shader.set_uniform_3fv('u_light_dir', DEFAULT_LIGHT_DIR);
+		shader.set_uniform_3fv('u_ambient_color', DEFAULT_AMBIENT);
+		shader.set_uniform_3fv('u_horizon_ambient_color', DEFAULT_AMBIENT);
+		shader.set_uniform_3fv('u_ground_ambient_color', DEFAULT_GROUND);
+		shader.set_uniform_3fv('u_direct_color', DEFAULT_DIRECT);
+	}
+
+	const fog = params?.fog_uniforms;
+	shader.set_uniform_3fv('u_camera_pos', params?.camera_pos ?? DEFAULT_CAMERA_POS);
+	if (fog) {
+		shader.set_uniform_1f('u_fog_enabled', fog.enabled);
+		shader.set_uniform_4fv('u_fog_density_params', fog.density_params);
+		shader.set_uniform_4fv('u_fog_height_plane', fog.height_plane);
+		shader.set_uniform_4fv('u_fog_color_height_rate', fog.color_height_rate);
+		shader.set_uniform_4fv('u_fog_hdensity_end_color', fog.hdensity_end_color);
+		shader.set_uniform_4fv('u_fog_sun_angle_color', fog.sun_angle_color);
+		shader.set_uniform_4fv('u_fog_hcolor_end_dist', fog.hcolor_end_dist);
+		shader.set_uniform_4fv('u_fog_sun_pct_str', fog.sun_pct_str);
+		shader.set_uniform_4fv('u_fog_sun_dir_z_scalar', fog.sun_dir_z_scalar);
+		shader.set_uniform_4fv('u_fog_height_coeff', fog.height_coeff);
+		shader.set_uniform_4fv('u_fog_main_coeff', fog.main_coeff);
+		shader.set_uniform_4fv('u_fog_hdensity_coeff', fog.hdensity_coeff);
+		shader.set_uniform_4fv('u_fog_distances', fog.distances);
+		shader.set_uniform_4fv('u_fog_hend_color_offset', fog.hend_color_offset);
+	} else {
+		shader.set_uniform_1f('u_fog_enabled', 0.0);
+	}
+}
 
 const VERTEX_SHADER_IDS = {
 	'Diffuse_T1': 0,
@@ -711,7 +754,7 @@ class M2Renderer {
 			this._update_animations(delta_time);
 	}
 
-	render(view, proj, light_dir, sun_color, sun_intensity, fog_params) {
+	render(view, proj, scene_params) {
 		if (!this.enabled)
 			return 0;
 
@@ -722,9 +765,6 @@ class M2Renderer {
 		shader.use();
 		shader.set_uniform_mat4('u_view', false, view);
 		shader.set_uniform_mat4('u_projection', false, proj);
-		shader.set_uniform_3fv('u_light_dir', light_dir);
-		shader.set_uniform_3fv('u_sun_color', sun_color);
-		shader.set_uniform_1f('u_sun_intensity', sun_intensity);
 		shader.set_uniform_1f('u_alpha_test', ALPHA_TEST_VALUE);
 		shader.set_uniform_4f('u_mesh_color', 1, 1, 1, 1);
 
@@ -733,27 +773,7 @@ class M2Renderer {
 		shader.set_uniform_1i('u_texture3', 2);
 		shader.set_uniform_1i('u_texture4', 3);
 
-		if (fog_params && fog_params.fog_uniforms) {
-			const fog = fog_params.fog_uniforms;
-			shader.set_uniform_3fv('u_camera_pos', fog_params.camera_pos);
-			shader.set_uniform_1f('u_fog_enabled', fog.enabled);
-			shader.set_uniform_4fv('u_fog_density_params', fog.density_params);
-			shader.set_uniform_4fv('u_fog_height_plane', fog.height_plane);
-			shader.set_uniform_4fv('u_fog_color_height_rate', fog.color_height_rate);
-			shader.set_uniform_4fv('u_fog_hdensity_end_color', fog.hdensity_end_color);
-			shader.set_uniform_4fv('u_fog_sun_angle_color', fog.sun_angle_color);
-			shader.set_uniform_4fv('u_fog_hcolor_end_dist', fog.hcolor_end_dist);
-			shader.set_uniform_4fv('u_fog_sun_pct_str', fog.sun_pct_str);
-			shader.set_uniform_4fv('u_fog_sun_dir_z_scalar', fog.sun_dir_z_scalar);
-			shader.set_uniform_4fv('u_fog_height_coeff', fog.height_coeff);
-			shader.set_uniform_4fv('u_fog_main_coeff', fog.main_coeff);
-			shader.set_uniform_4fv('u_fog_hdensity_coeff', fog.hdensity_coeff);
-			shader.set_uniform_4fv('u_fog_distances', fog.distances);
-			shader.set_uniform_4fv('u_fog_hend_color_offset', fog.hend_color_offset);
-		} else {
-			shader.set_uniform_3fv('u_camera_pos', fog_params?.camera_pos ?? new Float32Array(3));
-			shader.set_uniform_1f('u_fog_enabled', 0.0);
-		}
+		set_scene_uniforms(shader, scene_params);
 
 		let drawn = 0;
 

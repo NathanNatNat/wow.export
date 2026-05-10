@@ -13,19 +13,14 @@ uniform float u_float0;
 uniform float u_float1;
 uniform float u_time;
 
-uniform vec3 u_light_dir;
-uniform vec3 u_sun_color;
-uniform float u_sun_intensity;
 uniform vec3 u_camera_pos;
 
 out vec4 frag_color;
 
+#include "mpv_light.inc.glsl"
 #include "mpv_fog.inc.glsl"
 
 const float PI = 3.14159265359;
-const vec3 SKY_COLOR = vec3(0.4, 0.5, 0.7);
-const vec3 GROUND_COLOR = vec3(0.25, 0.2, 0.15);
-const float AMBIENT = 0.25;
 const float LIQUID_ALPHA_SHALLOW = 0.4;
 const float LIQUID_ALPHA_DEEP = 0.8;
 
@@ -60,13 +55,8 @@ void main() {
 
 	vec3 n = vec3(0.0, 1.0, 0.0);
 
-	if (u_material_id != 2 && u_material_id != 4) {
-		float n_dot_l = dot(n, u_light_dir);
-		float sky_factor = 0.5 + 0.5 * n.y;
-		vec3 ambient = mix(GROUND_COLOR, SKY_COLOR, sky_factor) * AMBIENT;
-		float diff = max(n_dot_l, 0.0);
-		diffuse = diffuse * (ambient + u_sun_color * diff * u_sun_intensity);
-	}
+	if (u_material_id != 2 && u_material_id != 4)
+		diffuse = calc_exterior_light(diffuse, n);
 
 	diffuse = apply_fog(diffuse, v_position, u_camera_pos);
 

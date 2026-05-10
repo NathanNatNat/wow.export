@@ -20,31 +20,18 @@ uniform vec4 u_mesh_color;
 uniform float u_alpha_test;
 uniform int u_apply_lighting;
 
-uniform vec3 u_light_dir;
-uniform vec3 u_sun_color;
-uniform float u_sun_intensity;
-
 uniform vec3 u_camera_pos;
 
 out vec4 frag_color;
 
+#include "mpv_light.inc.glsl"
 #include "mpv_fog.inc.glsl"
-
-const vec3 SKY_AMBIENT = vec3(0.6, 0.65, 0.7);
-const vec3 GROUND_AMBIENT = vec3(0.35, 0.3, 0.25);
 
 vec3 calc_lighting(vec3 color) {
 	if (u_apply_lighting == 0)
 		return color;
 
-	vec3 n = normalize(v_normal);
-	float n_dot_l = max(dot(n, u_light_dir), 0.0);
-
-	float sky_factor = 0.5 + 0.5 * n.y;
-	vec3 ambient = mix(GROUND_AMBIENT, SKY_AMBIENT, sky_factor);
-	vec3 diffuse = u_sun_color * n_dot_l * u_sun_intensity;
-
-	return color * (ambient + diffuse);
+	return calc_exterior_light(color, normalize(v_normal));
 }
 
 void main() {

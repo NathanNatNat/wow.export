@@ -18,17 +18,12 @@ uniform int u_pixel_shader;
 uniform int u_blend_mode;
 uniform int u_apply_lighting;
 
-uniform vec3 u_light_dir;
-uniform vec3 u_sun_color;
-uniform float u_sun_intensity;
 uniform vec3 u_camera_pos;
 
 out vec4 frag_color;
 
+#include "mpv_light.inc.glsl"
 #include "mpv_fog.inc.glsl"
-
-const vec3 SKY_AMBIENT = vec3(0.6, 0.65, 0.7);
-const vec3 GROUND_AMBIENT = vec3(0.35, 0.3, 0.25);
 
 void main() {
 	vec4 tex1 = texture(u_texture1, v_texcoord);
@@ -183,17 +178,10 @@ void main() {
 
 	// lighting
 	vec3 lit;
-	if (u_apply_lighting != 0) {
-		vec3 n = normalize(v_normal);
-		float n_dot_l = dot(n, u_light_dir);
-		float hemi = n_dot_l * 0.5 + 0.5;
-		vec3 ambient = mix(GROUND_AMBIENT, SKY_AMBIENT, hemi);
-		float direct = max(n_dot_l, 0.0);
-		float intensity = u_sun_intensity / 100.0;
-		lit = mat_diffuse * (ambient + u_sun_color * direct * intensity);
-	} else {
+	if (u_apply_lighting != 0)
+		lit = calc_exterior_light(mat_diffuse, normalize(v_normal));
+	else
 		lit = mat_diffuse;
-	}
 
 	lit += emissive;
 	lit = apply_fog(lit, v_position, u_camera_pos);
