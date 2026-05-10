@@ -203,8 +203,8 @@ class BLPImage {
 
 		// Calculate the scaled dimensions..
 		this.scale = Math.pow(2, mipmap);
-		this.scaledWidth = this.width / this.scale;
-		this.scaledHeight = this.height / this.scale;
+		this.scaledWidth = Math.max(1, Math.floor(this.width / this.scale));
+		this.scaledHeight = Math.max(1, Math.floor(this.height / this.scale));
 		this.scaledLength = this.scaledWidth * this.scaledHeight;
 
 		// Extract the raw data we need..
