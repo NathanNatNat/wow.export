@@ -868,6 +868,85 @@ class M2Renderer {
 		}
 	}
 
+	add_instances(source_key, placements) {
+		if (!placements || placements.length === 0)
+			return;
+
+		const by_model = new Map();
+		for (const p of placements) {
+			let arr = by_model.get(p.file_data_id);
+			if (!arr) {
+				arr = [];
+				by_model.set(p.file_data_id, arr);
+			}
+			arr.push(p);
+		}
+
+		for (const [id, instances] of by_model) {
+			let entry = this._model_cache.get(id);
+			if (!entry) {
+				entry = this._create_model_entry();
+				this._model_cache.set(id, entry);
+			}
+
+			if (!entry.tile_instances.has(source_key))
+				entry.ref_count++;
+
+			entry.tile_instances.set(source_key, instances);
+
+			if (!entry.vao && !entry.queued && !this._model_loading.has(id) && this._has_in_range_instances(entry)) {
+				entry.queued = true;
+				this._model_load_queue.push(id);
+			}
+		}
+
+		this._instances_dirty = true;
+	}
+
+	remove_instances(source_key) {
+		const to_dispose = [];
+
+		for (const [id, entry] of this._model_cache) {
+			if (!entry.tile_instances.has(source_key))
+				continue;
+
+			entry.tile_instances.delete(source_key);
+			entry.ref_count--;
+
+			if (entry.ref_count <= 0)
+				to_dispose.push(id);
+		}
+
+		for (const id of to_dispose)
+			this._dispose_model(id);
+
+		this._instances_dirty = true;
+	}
+
+	_create_model_entry() {
+		return {
+			vao: null,
+			index_count: 0,
+			draw_calls: null,
+			texture_ids: null,
+			instance_buffer: null,
+			instance_count: 0,
+			ref_count: 0,
+			tile_instances: new Map(),
+			bounding_box: null,
+			queued: false,
+			bones: null,
+			bone_count: 0,
+			bone_ubo: null,
+			bone_matrices: null,
+			anim_index: -1,
+			anim_duration: 0,
+			anim_time: 0,
+			global_loops: null,
+			global_seq_times: null
+		};
+	}
+
 	_pump_obj0_queue() {
 		while (this._obj0_loading.size < MAX_OBJ0_CONCURRENT && this._obj0_load_queue.length > 0) {
 			const key = this._obj0_load_queue.shift();
@@ -947,27 +1026,7 @@ class M2Renderer {
 				let entry = this._model_cache.get(id);
 
 				if (!entry) {
-					entry = {
-						vao: null,
-						index_count: 0,
-						draw_calls: null,
-						texture_ids: null,
-						instance_buffer: null,
-						instance_count: 0,
-						ref_count: 0,
-						tile_instances: new Map(),
-						bounding_box: null,
-						queued: false,
-						bones: null,
-						bone_count: 0,
-						bone_ubo: null,
-						bone_matrices: null,
-						anim_index: -1,
-						anim_duration: 0,
-						anim_time: 0,
-						global_loops: null,
-						global_seq_times: null
-					};
+					entry = this._create_model_entry();
 					this._model_cache.set(id, entry);
 				}
 

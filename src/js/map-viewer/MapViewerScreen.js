@@ -36,6 +36,7 @@ const SECTIONS = [
 			{ type: 'slider', key: 'mapViewerM2RenderDistance', label: 'M2 Render Distance', min: 50, max: 64000, step: 50 },
 			{ type: 'checkbox', key: 'mapViewerShowGlobalWMO', label: 'Show Global WMO', visible_data_key: 'has_global_wmo' },
 			{ type: 'checkbox', key: 'mapViewerShowWMOModels', label: 'Show WMO Models' },
+			{ type: 'checkbox', key: 'mapViewerShowWMODoodads', label: 'Show WMO Doodads' },
 			{ type: 'slider', key: 'mapViewerWMORenderDistance', label: 'WMO Render Distance', min: 50, max: 64000, step: 50 },
 			{ type: 'checkbox', key: 'mapViewerShowLiquids', label: 'Show Liquids' },
 			{ type: 'checkbox', key: 'mapViewerEnableSkybox', label: 'Enable Skybox' },
@@ -245,6 +246,11 @@ module.exports = {
 		'config.mapViewerShowWMOModels'(val) {
 			if (this._wmo_renderer)
 				this._wmo_renderer.set_enabled(val);
+		},
+
+		'config.mapViewerShowWMODoodads'(val) {
+			if (this._wmo_renderer)
+				this._wmo_renderer.set_doodads_enabled(val);
 		},
 
 		'config.mapViewerWMORenderDistance'(val) {
@@ -571,7 +577,9 @@ module.exports = {
 				m2.set_render_distance(core.view.config.mapViewerM2RenderDistance);
 
 				const wmo = new WMORenderer(this._gl_ctx);
+				wmo.set_m2_renderer(m2);
 				wmo.set_enabled(core.view.config.mapViewerShowWMOModels);
+				wmo.set_doodads_enabled(core.view.config.mapViewerShowWMODoodads);
 				wmo.set_render_distance(core.view.config.mapViewerWMORenderDistance);
 
 				const liquid = new LiquidRenderer(this._gl_ctx);

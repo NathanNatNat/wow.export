@@ -283,6 +283,89 @@ function collect_wmo_textures(wmo) {
 	return { material_tex_ids, unique_textures };
 }
 
+/**
+ * build doodad-local matrix from MODD quaternion placement.
+ * swizzles position/quaternion from WoW [X,Y,Z] to viewer [X,Z,-Y].
+ */
+function compute_doodad_local_matrix(position, rotation, scale) {
+	const px = position[0], py = position[2], pz = -position[1];
+	const qx = rotation[0], qy = rotation[2], qz = -rotation[1], qw = rotation[3];
+	const s = scale;
+
+	const x2 = qx + qx, y2 = qy + qy, z2 = qz + qz;
+	const xx = qx * x2, xy = qx * y2, xz = qx * z2;
+	const yy = qy * y2, yz = qy * z2, zz = qz * z2;
+	const wx = qw * x2, wy = qw * y2, wz = qw * z2;
+
+	const mat = new Float32Array(16);
+	mat[0]  = (1 - (yy + zz)) * s;
+	mat[1]  = (xy + wz) * s;
+	mat[2]  = (xz - wy) * s;
+	mat[4]  = (xy - wz) * s;
+	mat[5]  = (1 - (xx + zz)) * s;
+	mat[6]  = (yz + wx) * s;
+	mat[8]  = (xz + wy) * s;
+	mat[9]  = (yz - wx) * s;
+	mat[10] = (1 - (xx + yy)) * s;
+	mat[12] = px;
+	mat[13] = py;
+	mat[14] = pz;
+	mat[15] = 1;
+
+	return mat;
+}
+
+function mat4_multiply(out, a, b) {
+	for (let i = 0; i < 4; i++) {
+		const a0 = a[i], a4 = a[i + 4], a8 = a[i + 8], a12 = a[i + 12];
+		out[i]      = a0 * b[0]  + a4 * b[1]  + a8 * b[2]  + a12 * b[3];
+		out[i + 4]  = a0 * b[4]  + a4 * b[5]  + a8 * b[6]  + a12 * b[7];
+		out[i + 8]  = a0 * b[8]  + a4 * b[9]  + a8 * b[10] + a12 * b[11];
+		out[i + 12] = a0 * b[12] + a4 * b[13] + a8 * b[14] + a12 * b[15];
+	}
+}
+
+/**
+ * generate M2 doodad placements for the given active set indices.
+ * returns array of { file_data_id, matrix, world_pos }.
+ */
+function generate_doodad_placements(doodad_data, active_sets, wmo_matrix) {
+	const results = [];
+	const { sets, doodads, file_data_ids, doodad_names } = doodad_data;
+	const combined = new Float32Array(16);
+
+	for (const set_idx of active_sets) {
+		if (set_idx >= sets.length)
+			continue;
+
+		const set = sets[set_idx];
+		for (let i = 0; i < set.doodadCount; i++) {
+			const doodad = doodads[set.firstInstanceIndex + i];
+			if (!doodad)
+				continue;
+
+			let file_data_id = 0;
+			if (file_data_ids)
+				file_data_id = file_data_ids[doodad.offset];
+			else if (doodad_names)
+				file_data_id = listfile.getByFilename(doodad_names[doodad.offset]) || 0;
+
+			if (file_data_id <= 0)
+				continue;
+
+			const local_mat = compute_doodad_local_matrix(doodad.position, doodad.rotation, doodad.scale);
+			mat4_multiply(combined, wmo_matrix, local_mat);
+
+			const matrix = new Float32Array(combined);
+			const world_pos = new Float32Array([matrix[12], matrix[13], matrix[14]]);
+
+			results.push({ file_data_id, matrix, world_pos });
+		}
+	}
+
+	return results;
+}
+
 class WMORenderer {
 	constructor(gl_context) {
 		this.ctx = gl_context;
@@ -306,6 +389,9 @@ class WMORenderer {
 
 		this._global_file_data_id = 0;
 		this._global_enabled = false;
+
+		this._m2_renderer = null;
+		this._doodads_enabled = false;
 
 		this._last_cam = new Float32Array(3);
 		this._culled_dirty = false;
@@ -372,6 +458,12 @@ class WMORenderer {
 			for (const p of data.placements)
 				model_ids.add(p.file_data_id);
 
+			// remove doodad instances from M2Renderer
+			if (this._m2_renderer) {
+				for (const id of model_ids)
+					this._m2_renderer.remove_instances('wmo_dd:' + key + ':' + id);
+			}
+
 			for (const id of model_ids) {
 				const entry = this._model_cache.get(id);
 				if (!entry)
@@ -410,6 +502,7 @@ class WMORenderer {
 				groups: null,
 				bounding_box: null,
 				texture_ids: null,
+				doodad_data: null,
 				ref_count: 0,
 				tile_placements: new Map(),
 				culled_instances: [],
@@ -420,7 +513,11 @@ class WMORenderer {
 		}
 
 		entry.ref_count++;
-		entry.tile_placements.set('__global__', [{ file_data_id, matrix, world_pos, is_global: true }]);
+		entry.tile_placements.set('__global__', [{
+			file_data_id, matrix, world_pos, is_global: true,
+			doodad_set_index: placement.doodadSetIndex || 0,
+			modf_flags: placement.flags || 0
+		}]);
 
 		if (!entry.groups && !entry.queued && !this._wmo_loading.has(file_data_id)) {
 			entry.queued = true;
@@ -561,6 +658,85 @@ class WMORenderer {
 		}
 	}
 
+	set_m2_renderer(renderer) {
+		this._m2_renderer = renderer;
+	}
+
+	set_doodads_enabled(val) {
+		if (this._doodads_enabled === val)
+			return;
+
+		this._doodads_enabled = val;
+
+		if (!this._m2_renderer)
+			return;
+
+		if (val) {
+			for (const [wmo_id, entry] of this._model_cache) {
+				if (!entry.doodad_data)
+					continue;
+
+				for (const tile_key of entry.tile_placements.keys())
+					this._register_doodad_instances(wmo_id, tile_key);
+			}
+		} else {
+			this._remove_all_doodad_instances();
+		}
+	}
+
+	_register_doodad_instances(wmo_id, tile_key) {
+		if (!this._m2_renderer || !this._doodads_enabled)
+			return;
+
+		const entry = this._model_cache.get(wmo_id);
+		if (!entry?.doodad_data)
+			return;
+
+		const instances = entry.tile_placements.get(tile_key);
+		if (!instances)
+			return;
+
+		const tile = this._tile_data.get(tile_key);
+		const all_doodads = [];
+
+		for (const placement of instances) {
+			const active_sets = new Set();
+			active_sets.add(0);
+
+			if (placement.modf_flags & 0x80) {
+				const adt_sets = tile?.adt_doodad_sets;
+				if (adt_sets) {
+					for (const idx of adt_sets)
+						active_sets.add(idx);
+				}
+			} else if (placement.doodad_set_index > 0) {
+				active_sets.add(placement.doodad_set_index);
+			}
+
+			const doodads = generate_doodad_placements(entry.doodad_data, active_sets, placement.matrix);
+			for (const d of doodads)
+				all_doodads.push(d);
+		}
+
+		if (all_doodads.length > 0) {
+			const source_key = 'wmo_dd:' + tile_key + ':' + wmo_id;
+			this._m2_renderer.add_instances(source_key, all_doodads);
+		}
+	}
+
+	_remove_all_doodad_instances() {
+		if (!this._m2_renderer)
+			return;
+
+		for (const [wmo_id, entry] of this._model_cache) {
+			if (!entry.doodad_data)
+				continue;
+
+			for (const tile_key of entry.tile_placements.keys())
+				this._m2_renderer.remove_instances('wmo_dd:' + tile_key + ':' + wmo_id);
+		}
+	}
+
 	_pump_obj0_queue() {
 		while (this._obj0_loading.size < MAX_OBJ0_CONCURRENT && this._obj0_load_queue.length > 0) {
 			const key = this._obj0_load_queue.shift();
@@ -619,10 +795,15 @@ class WMORenderer {
 					MAP_COORD_BASE - modf.position[2]
 				]);
 
-				placements.push({ file_data_id, matrix, world_pos });
+				placements.push({
+					file_data_id, matrix, world_pos,
+					doodad_set_index: modf.doodadSet,
+					modf_flags: modf.flags
+				});
 			}
 
 			tile.placements = placements;
+			tile.adt_doodad_sets = obj_adt.doodadSets || null;
 			tile.loaded = true;
 
 			// group by model and register in cache
@@ -644,6 +825,7 @@ class WMORenderer {
 						groups: null,
 						bounding_box: null,
 						texture_ids: null,
+						doodad_data: null,
 						ref_count: 0,
 						tile_placements: new Map(),
 						culled_instances: [],
@@ -660,6 +842,10 @@ class WMORenderer {
 					entry.queued = true;
 					this._wmo_load_queue.push(id);
 				}
+
+				// if WMO already loaded with doodad data, generate instances now
+				if (entry.doodad_data)
+					this._register_doodad_instances(id, key);
 			}
 
 			this._culled_dirty = true;
@@ -699,6 +885,21 @@ class WMORenderer {
 			if (this._disposed || !this._model_cache.has(file_data_id)) {
 				this._wmo_loading.delete(file_data_id);
 				return;
+			}
+
+			// extract doodad data for WMO doodad set rendering
+			const entry_for_dd = this._model_cache.get(file_data_id);
+			if (wmo.doodadSets && wmo.doodads && wmo.doodadSets.length > 0) {
+				entry_for_dd.doodad_data = {
+					sets: wmo.doodadSets,
+					doodads: wmo.doodads,
+					file_data_ids: wmo.fileDataIDs || null,
+					doodad_names: wmo.doodadNames || null
+				};
+
+				// generate doodad instances for all existing placements
+				for (const tile_key of entry_for_dd.tile_placements.keys())
+					this._register_doodad_instances(file_data_id, tile_key);
 			}
 
 			// collect material texture references
@@ -1199,6 +1400,8 @@ class WMORenderer {
 
 	dispose() {
 		this._disposed = true;
+
+		this._remove_all_doodad_instances();
 
 		this._obj0_load_queue.length = 0;
 		this._obj0_loading.clear();
