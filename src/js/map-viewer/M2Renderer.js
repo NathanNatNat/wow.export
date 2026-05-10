@@ -32,7 +32,7 @@ const M2_VERTEX_STRIDE = 40;
 function compute_model_matrix(position, rotation, scale) {
 	const s = scale / 1024;
 	const ax = rotation[0] * DEG_TO_RAD;
-	const ay = rotation[1] * DEG_TO_RAD;
+	const ay = (rotation[1] - 90) * DEG_TO_RAD;
 	const az = rotation[2] * DEG_TO_RAD;
 
 	const ca = Math.cos(ax), sa = Math.sin(ax);
@@ -82,14 +82,13 @@ function build_model_geometry(m2, skin) {
 		const v = i * 3;
 		const uv = i * 2;
 
-		// un-swizzle M2Loader output [wow_x, wow_z, -wow_y] -> [wow_x, wow_y, wow_z]
 		view.setFloat32(offset, m2.vertices[v], true);
-		view.setFloat32(offset + 4, -m2.vertices[v + 2], true);
-		view.setFloat32(offset + 8, m2.vertices[v + 1], true);
+		view.setFloat32(offset + 4, m2.vertices[v + 1], true);
+		view.setFloat32(offset + 8, m2.vertices[v + 2], true);
 
 		view.setFloat32(offset + 12, m2.normals[v], true);
-		view.setFloat32(offset + 16, -m2.normals[v + 2], true);
-		view.setFloat32(offset + 20, m2.normals[v + 1], true);
+		view.setFloat32(offset + 16, m2.normals[v + 1], true);
+		view.setFloat32(offset + 20, m2.normals[v + 2], true);
 
 		view.setFloat32(offset + 24, m2.uv[uv], true);
 		view.setFloat32(offset + 28, m2.uv[uv + 1], true);
