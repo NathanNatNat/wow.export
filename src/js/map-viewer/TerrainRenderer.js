@@ -1151,7 +1151,7 @@ class TerrainRenderer {
 					job.alpha_tex = gl.createTexture();
 					gl.bindTexture(gl.TEXTURE_2D_ARRAY, job.alpha_tex);
 					gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.R8, 64, 64, job.total_alpha_layers, 0, gl.RED, gl.UNSIGNED_BYTE, null);
-					gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+					gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
 					gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 					gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
 					gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
@@ -1177,6 +1177,12 @@ class TerrainRenderer {
 
 				if (job.alpha_upload_index < job.alpha_uploads.length)
 					break;
+
+				gl.bindTexture(gl.TEXTURE_2D_ARRAY, job.alpha_tex);
+				gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
+
+				if (this.ctx.ext_aniso)
+					gl.texParameterf(gl.TEXTURE_2D_ARRAY, this.ctx.ext_aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, this.ctx.max_anisotropy));
 			}
 
 			this._finalize_full_upload(job);
