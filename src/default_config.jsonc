@@ -139,5 +139,6 @@
 	"mapViewerSunElevation": 55,
 	"mapViewerSunIntensity": 100,
 	"mapViewerSunColor": "#fff2d9",
-	"mapViewerAllowModelSelection": true
+	"mapViewerAllowModelSelection": true,
+	"mapViewerShowLiquids": true
 }

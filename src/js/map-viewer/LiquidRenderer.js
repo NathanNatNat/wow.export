@@ -1,0 +1,569 @@
+/*!
+	wow.export (https://github.com/Kruithne/wow.export)
+	Authors: Kruithne <kruithne@gmail.com>
+	License: MIT
+*/
+
+const core = require('../core');
+const constants = require('../constants');
+const Shaders = require('../3D/Shaders');
+const VertexArray = require('../3D/gl/VertexArray');
+const GLTexture = require('../3D/gl/GLTexture');
+const BLPFile = require('../casc/blp');
+const WDCReader = require('../db/WDCReader');
+const listfile = require('../casc/listfile');
+const log = require('../log');
+
+const TILE_SIZE = constants.GAME.TILE_SIZE;
+const UNIT_SIZE = (TILE_SIZE / 16) / 8;
+const LIQUID_VERTEX_STRIDE = 24; // pos(3f) + uv(2f) + depth(1f)
+const MAX_TEXTURE_LOADS = 2;
+
+const LIQUID_COLORS = {
+	water: new Float32Array([0.0, 0.2, 0.5]),
+	ocean: new Float32Array([0.0, 0.1, 0.4]),
+	magma: new Float32Array([0.6, 0.15, 0.0]),
+	slime: new Float32Array([0.2, 0.5, 0.1])
+};
+
+const MATERIAL_MAGMA = [2, 4];
+
+function liquid_category(liquid_type) {
+	if (liquid_type === 2 || liquid_type === 14 || liquid_type === 15)
+		return 'ocean';
+
+	if (liquid_type === 3 || liquid_type === 4 || liquid_type === 7 || liquid_type === 8 || liquid_type === 19)
+		return 'magma';
+
+	if (liquid_type === 5 || liquid_type === 6 || liquid_type === 9 || liquid_type === 17 || liquid_type === 20 || liquid_type === 21)
+		return 'slime';
+
+	return 'water';
+}
+
+class LiquidRenderer {
+	constructor(gl_context) {
+		this.ctx = gl_context;
+		this.gl = gl_context.gl;
+		this.shader = Shaders.create_program(gl_context, 'mpv_liquid');
+		this._casc = core.view.casc;
+
+		this._tile_data = new Map();
+		this._texture_cache = new Map();
+		this._texture_load_queue = [];
+		this._texture_loading = new Set();
+
+		this._db_loaded = false;
+		this._db_loading = false;
+		this._liquid_type_cache = new Map();
+
+		this._default_texture = this._create_default_texture();
+
+		this.enabled = true;
+		this._disposed = false;
+		this._start_time = performance.now();
+	}
+
+	_create_default_texture() {
+		const tex = new GLTexture(this.ctx);
+		tex.set_rgba(new Uint8Array([0, 0, 0, 0]), 1, 1, { has_alpha: true });
+		return tex;
+	}
+
+	get instance_count() {
+		let count = 0;
+		for (const tile of this._tile_data.values())
+			count += tile.instances.length;
+		return count;
+	}
+
+	get loading_count() {
+		return this._texture_load_queue.length + this._texture_loading.size;
+	}
+
+	async _ensure_db() {
+		if (this._db_loaded || this._db_loading)
+			return;
+
+		this._db_loading = true;
+		try {
+			// load DB2 tables directly so getRow() is synchronous
+			const lt = new WDCReader('DBFilesClient/LiquidType.db2');
+			await lt.parse();
+			lt.preload();
+			this._liquid_type_db = lt;
+
+			try {
+				const lo = new WDCReader('DBFilesClient/LiquidObject.db2');
+				await lo.parse();
+				lo.preload();
+				this._liquid_object_db = lo;
+			} catch {
+				// LiquidObject may not exist in older clients
+			}
+
+			try {
+				const lm = new WDCReader('DBFilesClient/LiquidMaterial.db2');
+				await lm.parse();
+				lm.preload();
+				this._liquid_material_db = lm;
+			} catch {
+				// LiquidMaterial may not exist in older clients
+			}
+
+			// LiquidTypeXTexture maps LiquidTypeID → FileDataID
+			this._liquid_type_textures = new Map();
+			try {
+				const ltxt = new WDCReader('DBFilesClient/LiquidTypeXTexture.db2');
+				await ltxt.parse();
+				ltxt.preload();
+
+				for (const [, row] of ltxt.getAllRows()) {
+					const type_id = row.LiquidTypeID;
+					if (!type_id)
+						continue;
+
+					if (!this._liquid_type_textures.has(type_id))
+						this._liquid_type_textures.set(type_id, []);
+
+					this._liquid_type_textures.get(type_id).push({
+						file_data_id: row.FileDataID,
+						order: row.OrderIndex ?? 0,
+						type: row.Type ?? 0
+					});
+				}
+
+				// sort each entry list by order index
+				for (const entries of this._liquid_type_textures.values())
+					entries.sort((a, b) => a.order - b.order);
+
+				log.write('LiquidTypeXTexture loaded: %d liquid types mapped', this._liquid_type_textures.size);
+			} catch {
+				// LiquidTypeXTexture may not exist in older clients
+			}
+
+			this._db_loaded = true;
+			this._liquid_type_cache.clear();
+			log.write('Liquid DB2 tables loaded');
+		} catch (e) {
+			log.write('Failed to load liquid DB2 tables: %s', e.message);
+		}
+		this._db_loading = false;
+	}
+
+	_get_liquid_info(liquid_type, liquid_object) {
+		const cache_key = liquid_type + '_' + liquid_object;
+		if (this._liquid_type_cache.has(cache_key))
+			return this._liquid_type_cache.get(cache_key);
+
+		const info = {
+			material_id: 1,
+			color: LIQUID_COLORS[liquid_category(liquid_type)],
+			flags: 0,
+			float0: 1.0,
+			float1: 0.0,
+			texture_id: 0,
+			generate_uv_from_pos: true
+		};
+
+		if (!this._db_loaded) {
+			this._liquid_type_cache.set(cache_key, info);
+			return info;
+		}
+
+		let resolved_type = liquid_type;
+
+		// resolve via LiquidObject if >= 42
+		if (liquid_object >= 42 && this._liquid_object_db) {
+			const lo_row = this._liquid_object_db.getRow(liquid_object);
+			if (lo_row)
+				resolved_type = lo_row.LiquidTypeID ?? resolved_type;
+		}
+
+		const lt_row = this._liquid_type_db?.getRow(resolved_type);
+		if (lt_row) {
+			info.material_id = lt_row.MaterialID ?? 1;
+			info.flags = lt_row.Flags ?? 0;
+
+			// animation floats
+			const floats = lt_row.Float;
+			if (floats) {
+				info.float0 = floats[0] ?? 1.0;
+				info.float1 = floats[1] ?? 0.0;
+			}
+
+			// color (BGR→RGB)
+			const color1 = lt_row.Color;
+			if (color1 && (color1[0] > 0 || color1[1] > 0 || color1[2] > 0))
+				info.color = new Float32Array([color1[2] / 255, color1[1] / 255, color1[0] / 255]);
+
+			// texture resolution: prefer LiquidTypeXTexture, fall back to string paths
+			const ltxt_entries = this._liquid_type_textures?.get(resolved_type);
+			if (ltxt_entries && ltxt_entries.length > 0) {
+				info.texture_id = ltxt_entries[0].file_data_id;
+			} else {
+				const tex_paths = lt_row.Texture;
+				if (tex_paths && tex_paths[0]) {
+					// replace %d frame placeholder with 0 for first frame
+					const tex_path = tex_paths[0].replace(/\\/g, '/').replace(/%d/g, '0').toLowerCase();
+					if (tex_path.length > 0) {
+						const fid = listfile.getByFilename(tex_path);
+						if (fid)
+							info.texture_id = fid;
+						else
+							info.texture_path = tex_path;
+					}
+				}
+			}
+		}
+
+		// determine UV generation mode
+		const mat_id = info.material_id;
+		if (MATERIAL_MAGMA.includes(mat_id)) {
+			info.generate_uv_from_pos = false;
+		} else if (liquid_type === 2 || liquid_type === 14) {
+			info.generate_uv_from_pos = true;
+		} else if (liquid_object < 42 && mat_id === 1) {
+			info.generate_uv_from_pos = true;
+		} else {
+			info.generate_uv_from_pos = true;
+		}
+
+		this._liquid_type_cache.set(cache_key, info);
+		return info;
+	}
+
+	on_tile_loaded(key, liquid_chunks, chunk_positions) {
+		if (!liquid_chunks || this._disposed)
+			return;
+
+		const instances = [];
+
+		for (let i = 0; i < 256; i++) {
+			const chunk = liquid_chunks[i];
+			if (!chunk?.instances)
+				continue;
+
+			const pos = chunk_positions[i];
+			if (!pos)
+				continue;
+
+			for (const inst of chunk.instances) {
+				if (!inst)
+					continue;
+
+				const geo = this._build_liquid_geometry(inst, pos);
+				if (!geo)
+					continue;
+
+				const info = this._get_liquid_info(inst.liquidType, inst.liquidObject);
+				const vao = this._upload_liquid_vao(geo);
+
+				instances.push({
+					vao,
+					index_count: geo.index_count,
+					info,
+					center: geo.center
+				});
+
+				// queue texture load
+				const tex_key = info.texture_id || info.texture_path;
+				if (tex_key && !this._texture_cache.has(tex_key) && !this._texture_loading.has(tex_key))
+					this._texture_load_queue.push({ key: tex_key, id: info.texture_id, path: info.texture_path });
+			}
+		}
+
+		if (instances.length > 0)
+			this._tile_data.set(key, { instances });
+	}
+
+	on_tile_unloaded(key) {
+		const data = this._tile_data.get(key);
+		if (!data)
+			return;
+
+		for (const inst of data.instances) {
+			if (inst.vao)
+				inst.vao.dispose();
+		}
+
+		this._tile_data.delete(key);
+	}
+
+	_build_liquid_geometry(inst, chunk_pos) {
+		const width = inst.width;
+		const height = inst.height;
+		if (width === 0 || height === 0)
+			return null;
+
+		const vert_w = width + 1;
+		const vert_h = height + 1;
+		const vert_count = vert_w * vert_h;
+
+		const heights = inst.vertexData?.height;
+		if (!heights || heights.length < vert_count)
+			return null;
+
+		const info = this._get_liquid_info(inst.liquidType, inst.liquidObject);
+		const has_uv = !info.generate_uv_from_pos && inst.vertexData?.uv;
+		const has_depth = !!inst.vertexData?.depth;
+
+		const vertex_data = new ArrayBuffer(vert_count * LIQUID_VERTEX_STRIDE);
+		const view = new DataView(vertex_data);
+
+		// chunk base position (same coord system as terrain)
+		const cx = chunk_pos[0];
+		const cy = chunk_pos[1];
+		const cz = chunk_pos[2];
+
+		let center_x = 0, center_y = 0, center_z = 0;
+
+		for (let row = 0; row < vert_h; row++) {
+			for (let col = 0; col < vert_w; col++) {
+				const idx = row * vert_w + col;
+				const offset = idx * LIQUID_VERTEX_STRIDE;
+
+				// position: same transform as terrain vertices
+				const vx = cy - ((col + inst.xOffset) * UNIT_SIZE);
+				const vy = heights[idx];
+				const vz = cx - ((row + inst.yOffset) * UNIT_SIZE);
+
+				view.setFloat32(offset, vx, true);
+				view.setFloat32(offset + 4, vy, true);
+				view.setFloat32(offset + 8, vz, true);
+
+				center_x += vx;
+				center_y += vy;
+				center_z += vz;
+
+				// UV
+				let u, v;
+				if (has_uv && inst.vertexData.uv[idx]) {
+					u = inst.vertexData.uv[idx].x * 3.0 / 256.0;
+					v = inst.vertexData.uv[idx].y * 3.0 / 256.0;
+				} else {
+					u = vx * 0.06;
+					v = vz * 0.06;
+				}
+
+				view.setFloat32(offset + 12, u, true);
+				view.setFloat32(offset + 16, v, true);
+
+				// depth
+				const depth = has_depth ? (inst.vertexData.depth[idx] / 255) : 1.0;
+				view.setFloat32(offset + 20, depth, true);
+			}
+		}
+
+		center_x /= vert_count;
+		center_y /= vert_count;
+		center_z /= vert_count;
+
+		// build index buffer using existence bitmap
+		const max_quads = width * height;
+		const indices = [];
+
+		for (let row = 0; row < height; row++) {
+			for (let col = 0; col < width; col++) {
+				const quad_idx = row * width + col;
+
+				// check bitmap
+				if (inst.bitmap && inst.bitmap.length > 0) {
+					const byte_idx = quad_idx >> 3;
+					const bit_idx = quad_idx & 7;
+					if (byte_idx < inst.bitmap.length && !(inst.bitmap[byte_idx] & (1 << bit_idx)))
+						continue;
+				}
+
+				const tl = row * vert_w + col;
+				const tr = tl + 1;
+				const bl = (row + 1) * vert_w + col;
+				const br = bl + 1;
+
+				indices.push(tl, tr, bl);
+				indices.push(tr, br, bl);
+			}
+		}
+
+		if (indices.length === 0)
+			return null;
+
+		return {
+			vertex_data,
+			index_data: new Uint16Array(indices),
+			index_count: indices.length,
+			center: new Float32Array([center_x, center_y, center_z])
+		};
+	}
+
+	_upload_liquid_vao(geo) {
+		const gl = this.gl;
+		const vao = new VertexArray(this.ctx);
+		vao.bind();
+
+		vao.set_vertex_buffer(geo.vertex_data);
+
+		// pos(3f) at 0, uv(2f) at 12, depth(1f) at 20, stride 24
+		gl.enableVertexAttribArray(0);
+		gl.vertexAttribPointer(0, 3, gl.FLOAT, false, LIQUID_VERTEX_STRIDE, 0);
+		gl.enableVertexAttribArray(1);
+		gl.vertexAttribPointer(1, 2, gl.FLOAT, false, LIQUID_VERTEX_STRIDE, 12);
+		gl.enableVertexAttribArray(2);
+		gl.vertexAttribPointer(2, 1, gl.FLOAT, false, LIQUID_VERTEX_STRIDE, 20);
+
+		vao.set_index_buffer(geo.index_data);
+
+		return vao;
+	}
+
+	update() {
+		if (this._disposed)
+			return;
+
+		if (this.enabled)
+			this._pump_texture_queue();
+	}
+
+	_pump_texture_queue() {
+		while (this._texture_loading.size < MAX_TEXTURE_LOADS && this._texture_load_queue.length > 0) {
+			const entry = this._texture_load_queue.shift();
+			if (this._texture_cache.has(entry.key) || this._texture_loading.has(entry.key))
+				continue;
+
+			this._start_texture_load(entry);
+		}
+	}
+
+	async _start_texture_load(entry) {
+		this._texture_loading.add(entry.key);
+
+		try {
+			let data;
+			if (entry.id > 0)
+				data = await this._casc.getFile(entry.id);
+			else if (entry.path)
+				data = await this._casc.getFileByName(entry.path);
+
+			if (this._disposed || !data) {
+				this._texture_loading.delete(entry.key);
+				return;
+			}
+
+			const blp = new BLPFile(data);
+			const gl_tex = new GLTexture(this.ctx);
+			gl_tex.set_blp(blp, { flags: 0x3 }); // REPEAT both axes
+			this._texture_cache.set(entry.key, gl_tex);
+		} catch (e) {
+			log.write('Failed to load liquid texture %s: %s', entry.key, e.message);
+		}
+
+		this._texture_loading.delete(entry.key);
+	}
+
+	render(view, proj, light_dir, sun_color, sun_intensity, fog_params) {
+		if (!this.enabled || this._tile_data.size === 0)
+			return 0;
+
+		const gl = this.gl;
+		const ctx = this.ctx;
+		const shader = this.shader;
+
+		if (!shader.is_valid())
+			return 0;
+
+		shader.use();
+		shader.set_uniform_mat4('u_view', false, view);
+		shader.set_uniform_mat4('u_projection', false, proj);
+		shader.set_uniform_3fv('u_light_dir', light_dir);
+		shader.set_uniform_3fv('u_sun_color', sun_color);
+		shader.set_uniform_1f('u_sun_intensity', sun_intensity);
+		shader.set_uniform_1i('u_texture', 0);
+
+		const time = performance.now() - this._start_time;
+		shader.set_uniform_1f('u_time', time);
+
+		if (fog_params) {
+			shader.set_uniform_3fv('u_camera_pos', fog_params.camera_pos);
+			shader.set_uniform_3fv('u_fog_color', fog_params.fog_color);
+			shader.set_uniform_1f('u_fog_start', fog_params.fog_start);
+			shader.set_uniform_1f('u_fog_end', fog_params.fog_end);
+		} else {
+			shader.set_uniform_1f('u_fog_start', 999999.0);
+			shader.set_uniform_1f('u_fog_end', 999999.0);
+		}
+
+		// alpha blending
+		ctx.set_blend(true);
+		ctx.set_blend_func_separate(
+			gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA,
+			gl.ONE, gl.ONE_MINUS_SRC_ALPHA
+		);
+		ctx.set_depth_test(true);
+		ctx.set_depth_write(true);
+		ctx.set_cull_face(false);
+
+		let drawn = 0;
+
+		for (const tile of this._tile_data.values()) {
+			for (const inst of tile.instances) {
+				shader.set_uniform_1i('u_material_id', inst.info.material_id);
+				shader.set_uniform_1i('u_liquid_flags', inst.info.flags);
+				shader.set_uniform_3fv('u_liquid_color', inst.info.color);
+				shader.set_uniform_1f('u_float0', inst.info.float0);
+				shader.set_uniform_1f('u_float1', inst.info.float1);
+
+				const tex_key = inst.info.texture_id || inst.info.texture_path;
+				const tex = tex_key
+					? (this._texture_cache.get(tex_key) ?? this._default_texture)
+					: this._default_texture;
+
+				tex.bind(0);
+
+				inst.vao.bind();
+				gl.drawElements(gl.TRIANGLES, inst.index_count, gl.UNSIGNED_SHORT, 0);
+				drawn++;
+			}
+		}
+
+		// reset state
+		ctx.set_blend(false);
+		ctx.set_depth_write(true);
+
+		return drawn;
+	}
+
+	set_enabled(val) {
+		this.enabled = val;
+	}
+
+	dispose() {
+		this._disposed = true;
+		this._texture_load_queue.length = 0;
+		this._texture_loading.clear();
+
+		for (const tile of this._tile_data.values()) {
+			for (const inst of tile.instances) {
+				if (inst.vao)
+					inst.vao.dispose();
+			}
+		}
+		this._tile_data.clear();
+
+		for (const tex of this._texture_cache.values())
+			tex.dispose();
+		this._texture_cache.clear();
+
+		if (this._default_texture) {
+			this._default_texture.dispose();
+			this._default_texture = null;
+		}
+
+		if (this.shader) {
+			Shaders.unregister(this.shader);
+			this.shader.dispose();
+			this.shader = null;
+		}
+	}
+}
+
+module.exports = LiquidRenderer;

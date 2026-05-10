@@ -6,6 +6,7 @@ const PerspectiveCamera = require('./PerspectiveCamera');
 const FreeCameraControls = require('./FreeCameraControls');
 const TerrainRenderer = require('./TerrainRenderer');
 const M2Renderer = require('./M2Renderer');
+const LiquidRenderer = require('./LiquidRenderer');
 const Minimap = require('./Minimap');
 
 const TILE_SIZE = constants.GAME.TILE_SIZE;
@@ -29,6 +30,7 @@ const SECTIONS = [
 			{ type: 'slider', key: 'mapViewerRenderDistance', label: 'Render Distance', min: 1, max: 256, step: 1 },
 			{ type: 'checkbox', key: 'mapViewerShowM2Models', label: 'Show M2 Models' },
 			{ type: 'slider', key: 'mapViewerM2RenderDistance', label: 'M2 Render Distance', min: 50, max: 64000, step: 50 },
+			{ type: 'checkbox', key: 'mapViewerShowLiquids', label: 'Show Liquids' },
 			{ type: 'color', key: 'mapViewerSkyColor', label: 'Sky Colour' },
 			{ type: 'checkbox', key: 'mapViewerFogEnabled', label: 'Enable Fog' },
 			{ type: 'color', key: 'mapViewerFogColor', label: 'Fog Colour' },
@@ -249,6 +251,14 @@ module.exports = {
 				this._m2_renderer.set_render_distance(val);
 		},
 
+		'config.mapViewerShowLiquids'(val) {
+			if (this._liquid_renderer) {
+				this._liquid_renderer.set_enabled(val);
+				if (val)
+					this._init_liquid_db();
+			}
+		},
+
 		'config.mapViewerShowMinimap'(val) {
 			if (val)
 				this._init_minimap();
@@ -415,6 +425,26 @@ module.exports = {
 					if (this.show_adt_bounds)
 						this._terrain.render_grid(this._camera.view_matrix, this._camera.projection_matrix, GRID_COLOR);
 
+					// liquids
+					let liquid_drawn = 0;
+					if (this._liquid_renderer) {
+						this._liquid_renderer.update();
+
+						const liq_fog = this._terrain.fog_enabled ? {
+							camera_pos: this._terrain.camera_pos,
+							fog_color: this._terrain.fog_color,
+							fog_start: this._terrain.fog_start,
+							fog_end: this._terrain.fog_end
+						} : null;
+
+						liquid_drawn = this._liquid_renderer.render(
+							this._camera.view_matrix, this._camera.projection_matrix,
+							this._terrain.light_dir, this._terrain.sun_color, this._terrain.sun_intensity,
+							liq_fog
+						);
+						this._gl_ctx.set_depth_test(true);
+					}
+
 					// m2 models
 					let m2_drawn = 0;
 					if (this._m2_renderer) {
@@ -440,6 +470,9 @@ module.exports = {
 					const loaded = this._terrain.tile_count;
 					const loading = this._terrain.loading_count;
 					let status = loaded + ' ADT (' + loading + ' queued), render (' + visible + '/' + this._terrain.chunk_count + ')';
+
+					if (this._liquid_renderer && liquid_drawn > 0)
+						status += ' | Liquid: ' + liquid_drawn;
 
 					if (this._m2_renderer) {
 						const m2_models = this._m2_renderer.model_count;
@@ -499,14 +532,26 @@ module.exports = {
 				m2.set_enabled(core.view.config.mapViewerShowM2Models);
 				m2.set_render_distance(core.view.config.mapViewerM2RenderDistance);
 
-				terrain._on_tile_load = (key, info) => m2.on_tile_loaded(key, info);
-				terrain._on_tile_unload = (key) => m2.on_tile_unloaded(key);
+				const liquid = new LiquidRenderer(this._gl_ctx);
+				liquid.set_enabled(core.view.config.mapViewerShowLiquids);
+
+				terrain._on_tile_load = (key, info, liquid_chunks, chunk_positions) => {
+					m2.on_tile_loaded(key, info);
+					if (liquid_chunks)
+						liquid.on_tile_loaded(key, liquid_chunks, chunk_positions);
+				};
+				terrain._on_tile_unload = (key) => {
+					m2.on_tile_unloaded(key);
+					liquid.on_tile_unloaded(key);
+				};
 
 				this._m2_renderer = m2;
+				this._liquid_renderer = liquid;
 				this._terrain = terrain;
 				this._apply_sun_settings();
 				this._position_camera();
 				this._init_minimap();
+				this._init_liquid_db();
 			} catch (e) {
 				this.status_text = 'Error: ' + e.message;
 				terrain.dispose();
@@ -560,6 +605,13 @@ module.exports = {
 				cam[1] = ground + this._height_above_terrain;
 				cam[2] = world_z;
 			});
+		},
+
+		async _init_liquid_db() {
+			if (!this._liquid_renderer || !core.view.config.mapViewerShowLiquids)
+				return;
+
+			await this._liquid_renderer._ensure_db();
 		},
 
 		_dispose_minimap() {
@@ -637,6 +689,11 @@ module.exports = {
 			if (this._controls) {
 				this._controls.dispose();
 				this._controls = null;
+			}
+
+			if (this._liquid_renderer) {
+				this._liquid_renderer.dispose();
+				this._liquid_renderer = null;
 			}
 
 			if (this._m2_renderer) {

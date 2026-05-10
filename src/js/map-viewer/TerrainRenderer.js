@@ -323,6 +323,12 @@ class TerrainRenderer {
 				return;
 			}
 
+			// extract liquid data and chunk positions for LiquidRenderer
+			const liquid_chunks = adt.liquidChunks ?? null;
+			const chunk_positions = new Array(256);
+			for (let i = 0; i < 256; i++)
+				chunk_positions[i] = adt.chunks[i]?.position ?? null;
+
 			const [minimap_blp, adt_tex_pixels] = await Promise.all([
 				this._load_minimap_blp(info),
 				this._load_adt_tex(info)
@@ -331,7 +337,7 @@ class TerrainRenderer {
 			if (!this._loading.has(key))
 				return this._pump_load_queue();
 
-			this._upload_queue.push({ key, geo, minimap_blp, adt_tex_pixels });
+			this._upload_queue.push({ key, geo, minimap_blp, adt_tex_pixels, liquid_chunks, chunk_positions });
 		} catch (e) {
 			this._loading.delete(key);
 		}
@@ -429,7 +435,7 @@ class TerrainRenderer {
 
 	_process_uploads(budget = 1) {
 		while (budget-- > 0 && this._upload_queue.length > 0) {
-			const { key, geo, minimap_blp, adt_tex_pixels } = this._upload_queue.shift();
+			const { key, geo, minimap_blp, adt_tex_pixels, liquid_chunks, chunk_positions } = this._upload_queue.shift();
 
 			if (!this._loading.has(key))
 				continue;
@@ -443,7 +449,7 @@ class TerrainRenderer {
 			this._chunk_grid_dirty = true;
 
 			if (this._on_tile_load)
-				this._on_tile_load(key, this._tile_info.get(key));
+				this._on_tile_load(key, this._tile_info.get(key), liquid_chunks, chunk_positions);
 		}
 	}
 
