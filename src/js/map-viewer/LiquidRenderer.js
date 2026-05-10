@@ -59,6 +59,9 @@ class LiquidRenderer {
 
 		this._default_texture = this._create_default_texture();
 
+		this._frustum_planes = new Float32Array(24);
+		this._vp_matrix = new Float32Array(16);
+
 		this.enabled = true;
 		this._disposed = false;
 		this._start_time = performance.now();
@@ -263,7 +266,8 @@ class LiquidRenderer {
 					vao,
 					index_count: geo.index_count,
 					info,
-					center: geo.center
+					bounds_min: geo.bounds_min,
+					bounds_max: geo.bounds_max
 				});
 
 				// queue texture load
@@ -273,8 +277,38 @@ class LiquidRenderer {
 			}
 		}
 
-		if (instances.length > 0)
-			this._tile_data.set(key, { instances });
+		if (instances.length === 0)
+			return;
+
+		// build flat bounds array and tile-level AABB
+		const count = instances.length;
+		const bounds = new Float32Array(count * 6);
+		const tile_min = new Float32Array([Infinity, Infinity, Infinity]);
+		const tile_max = new Float32Array([-Infinity, -Infinity, -Infinity]);
+
+		for (let i = 0; i < count; i++) {
+			const inst = instances[i];
+			const bo = i * 6;
+			bounds[bo] = inst.bounds_min[0];
+			bounds[bo + 1] = inst.bounds_min[1];
+			bounds[bo + 2] = inst.bounds_min[2];
+			bounds[bo + 3] = inst.bounds_max[0];
+			bounds[bo + 4] = inst.bounds_max[1];
+			bounds[bo + 5] = inst.bounds_max[2];
+
+			for (let j = 0; j < 3; j++) {
+				if (inst.bounds_min[j] < tile_min[j])
+					tile_min[j] = inst.bounds_min[j];
+				if (inst.bounds_max[j] > tile_max[j])
+					tile_max[j] = inst.bounds_max[j];
+			}
+
+			// free per-instance bounds (now in flat array)
+			delete inst.bounds_min;
+			delete inst.bounds_max;
+		}
+
+		this._tile_data.set(key, { instances, bounds, bounds_min: tile_min, bounds_max: tile_max });
 	}
 
 	on_tile_unloaded(key) {
@@ -316,7 +350,8 @@ class LiquidRenderer {
 		const cy = chunk_pos[1];
 		const cz = chunk_pos[2];
 
-		let center_x = 0, center_y = 0, center_z = 0;
+		let min_x = Infinity, min_y = Infinity, min_z = Infinity;
+		let max_x = -Infinity, max_y = -Infinity, max_z = -Infinity;
 
 		for (let row = 0; row < vert_h; row++) {
 			for (let col = 0; col < vert_w; col++) {
@@ -332,9 +367,12 @@ class LiquidRenderer {
 				view.setFloat32(offset + 4, vy, true);
 				view.setFloat32(offset + 8, vz, true);
 
-				center_x += vx;
-				center_y += vy;
-				center_z += vz;
+				if (vx < min_x) min_x = vx;
+				if (vy < min_y) min_y = vy;
+				if (vz < min_z) min_z = vz;
+				if (vx > max_x) max_x = vx;
+				if (vy > max_y) max_y = vy;
+				if (vz > max_z) max_z = vz;
 
 				// UV
 				let u, v;
@@ -355,9 +393,8 @@ class LiquidRenderer {
 			}
 		}
 
-		center_x /= vert_count;
-		center_y /= vert_count;
-		center_z /= vert_count;
+		const bounds_min = new Float32Array([min_x, min_y, min_z]);
+		const bounds_max = new Float32Array([max_x, max_y, max_z]);
 
 		// build index buffer using existence bitmap
 		const max_quads = width * height;
@@ -392,7 +429,8 @@ class LiquidRenderer {
 			vertex_data,
 			index_data: new Uint16Array(indices),
 			index_count: indices.length,
-			center: new Float32Array([center_x, center_y, center_z])
+			bounds_min,
+			bounds_max
 		};
 	}
 
@@ -502,10 +540,21 @@ class LiquidRenderer {
 		ctx.set_depth_write(true);
 		ctx.set_cull_face(false);
 
+		this._compute_frustum(view, proj);
+		const planes = this._frustum_planes;
+
 		let drawn = 0;
 
 		for (const tile of this._tile_data.values()) {
-			for (const inst of tile.instances) {
+			if (!this._is_tile_visible(tile, planes))
+				continue;
+
+			const bounds = tile.bounds;
+			for (let i = 0; i < tile.instances.length; i++) {
+				if (!this._is_aabb_visible(bounds, i * 6, planes))
+					continue;
+
+				const inst = tile.instances[i];
 				shader.set_uniform_1i('u_material_id', inst.info.material_id);
 				shader.set_uniform_1i('u_liquid_flags', inst.info.flags);
 				shader.set_uniform_3fv('u_liquid_color', inst.info.color);
@@ -534,6 +583,72 @@ class LiquidRenderer {
 
 	set_enabled(val) {
 		this.enabled = val;
+	}
+
+	_compute_frustum(view, proj) {
+		const vp = this._vp_matrix;
+		for (let i = 0; i < 4; i++) {
+			for (let j = 0; j < 4; j++) {
+				vp[j * 4 + i] =
+					proj[i] * view[j * 4] +
+					proj[4 + i] * view[j * 4 + 1] +
+					proj[8 + i] * view[j * 4 + 2] +
+					proj[12 + i] * view[j * 4 + 3];
+			}
+		}
+
+		const p = this._frustum_planes;
+
+		p[0] = vp[3] + vp[0]; p[1] = vp[7] + vp[4]; p[2] = vp[11] + vp[8]; p[3] = vp[15] + vp[12];
+		p[4] = vp[3] - vp[0]; p[5] = vp[7] - vp[4]; p[6] = vp[11] - vp[8]; p[7] = vp[15] - vp[12];
+		p[8] = vp[3] + vp[1]; p[9] = vp[7] + vp[5]; p[10] = vp[11] + vp[9]; p[11] = vp[15] + vp[13];
+		p[12] = vp[3] - vp[1]; p[13] = vp[7] - vp[5]; p[14] = vp[11] - vp[9]; p[15] = vp[15] - vp[13];
+		p[16] = vp[3] + vp[2]; p[17] = vp[7] + vp[6]; p[18] = vp[11] + vp[10]; p[19] = vp[15] + vp[14];
+		p[20] = vp[3] - vp[2]; p[21] = vp[7] - vp[6]; p[22] = vp[11] - vp[10]; p[23] = vp[15] - vp[14];
+
+		for (let i = 0; i < 6; i++) {
+			const o = i * 4;
+			const len = Math.sqrt(p[o] * p[o] + p[o + 1] * p[o + 1] + p[o + 2] * p[o + 2]);
+			if (len > 0) {
+				p[o] /= len;
+				p[o + 1] /= len;
+				p[o + 2] /= len;
+				p[o + 3] /= len;
+			}
+		}
+	}
+
+	_is_tile_visible(tile, planes) {
+		const min = tile.bounds_min;
+		const max = tile.bounds_max;
+
+		for (let i = 0; i < 6; i++) {
+			const o = i * 4;
+			const a = planes[o], b = planes[o + 1], c = planes[o + 2], d = planes[o + 3];
+			const px = a >= 0 ? max[0] : min[0];
+			const py = b >= 0 ? max[1] : min[1];
+			const pz = c >= 0 ? max[2] : min[2];
+
+			if (a * px + b * py + c * pz + d < 0)
+				return false;
+		}
+
+		return true;
+	}
+
+	_is_aabb_visible(bounds, bo, planes) {
+		for (let i = 0; i < 6; i++) {
+			const o = i * 4;
+			const a = planes[o], b = planes[o + 1], c = planes[o + 2], d = planes[o + 3];
+			const px = a >= 0 ? bounds[bo + 3] : bounds[bo];
+			const py = b >= 0 ? bounds[bo + 4] : bounds[bo + 1];
+			const pz = c >= 0 ? bounds[bo + 5] : bounds[bo + 2];
+
+			if (a * px + b * py + c * pz + d < 0)
+				return false;
+		}
+
+		return true;
 	}
 
 	dispose() {
