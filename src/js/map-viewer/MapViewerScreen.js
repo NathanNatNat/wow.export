@@ -6,6 +6,7 @@ const PerspectiveCamera = require('./PerspectiveCamera');
 const FreeCameraControls = require('./FreeCameraControls');
 const TerrainRenderer = require('./TerrainRenderer');
 const M2Renderer = require('./M2Renderer');
+const WMORenderer = require('./WMORenderer');
 const LiquidRenderer = require('./LiquidRenderer');
 const FogDataProvider = require('./FogDataProvider');
 const Minimap = require('./Minimap');
@@ -31,6 +32,8 @@ const SECTIONS = [
 			{ type: 'slider', key: 'mapViewerRenderDistance', label: 'Render Distance', min: 1, max: 256, step: 1 },
 			{ type: 'checkbox', key: 'mapViewerShowM2Models', label: 'Show M2 Models' },
 			{ type: 'slider', key: 'mapViewerM2RenderDistance', label: 'M2 Render Distance', min: 50, max: 64000, step: 50 },
+			{ type: 'checkbox', key: 'mapViewerShowWMOModels', label: 'Show WMO Models' },
+			{ type: 'slider', key: 'mapViewerWMORenderDistance', label: 'WMO Render Distance', min: 50, max: 64000, step: 50 },
 			{ type: 'checkbox', key: 'mapViewerShowLiquids', label: 'Show Liquids' },
 			{ type: 'color', key: 'mapViewerSkyColor', label: 'Sky Colour' },
 			{ type: 'checkbox', key: 'mapViewerFogEnabled', label: 'Enable Fog' },
@@ -245,6 +248,16 @@ module.exports = {
 				this._m2_renderer.set_render_distance(val);
 		},
 
+		'config.mapViewerShowWMOModels'(val) {
+			if (this._wmo_renderer)
+				this._wmo_renderer.set_enabled(val);
+		},
+
+		'config.mapViewerWMORenderDistance'(val) {
+			if (this._wmo_renderer)
+				this._wmo_renderer.set_render_distance(val);
+		},
+
 		'config.mapViewerShowLiquids'(val) {
 			if (this._liquid_renderer) {
 				this._liquid_renderer.set_enabled(val);
@@ -451,6 +464,21 @@ module.exports = {
 						this._gl_ctx.set_depth_test(true);
 					}
 
+					// wmo models (render before M2 so opaque buildings are in depth buffer)
+					let wmo_drawn = 0;
+					if (this._wmo_renderer) {
+						this._wmo_renderer.update(cam);
+
+						wmo_drawn = this._wmo_renderer.render(
+							this._camera.view_matrix, this._camera.projection_matrix,
+							this._terrain.light_dir, this._terrain.sun_color, this._terrain.sun_intensity,
+							fog_params
+						);
+						this._gl_ctx.set_depth_test(true);
+
+						this._wmo_renderer.render_selection(this._camera.view_matrix, this._camera.projection_matrix);
+					}
+
 					// m2 models
 					let m2_drawn = 0;
 					if (this._m2_renderer) {
@@ -472,6 +500,14 @@ module.exports = {
 
 					if (this._liquid_renderer && liquid_drawn > 0)
 						status += ' | Liquid: ' + liquid_drawn;
+
+					if (this._wmo_renderer) {
+						const wmo_models = this._wmo_renderer.model_count;
+						const wmo_loading = this._wmo_renderer.loading_count;
+						status += ' | WMO: ' + wmo_drawn + ' inst, ' + wmo_models + ' models';
+						if (wmo_loading > 0)
+							status += ' (' + wmo_loading + ' loading)';
+					}
 
 					if (this._m2_renderer) {
 						const m2_models = this._m2_renderer.model_count;
@@ -531,20 +567,27 @@ module.exports = {
 				m2.set_enabled(core.view.config.mapViewerShowM2Models);
 				m2.set_render_distance(core.view.config.mapViewerM2RenderDistance);
 
+				const wmo = new WMORenderer(this._gl_ctx);
+				wmo.set_enabled(core.view.config.mapViewerShowWMOModels);
+				wmo.set_render_distance(core.view.config.mapViewerWMORenderDistance);
+
 				const liquid = new LiquidRenderer(this._gl_ctx);
 				liquid.set_enabled(core.view.config.mapViewerShowLiquids);
 
 				terrain._on_tile_load = (key, info, liquid_chunks, chunk_positions) => {
 					m2.on_tile_loaded(key, info);
+					wmo.on_tile_loaded(key, info);
 					if (liquid_chunks)
 						liquid.on_tile_loaded(key, liquid_chunks, chunk_positions);
 				};
 				terrain._on_tile_unload = (key) => {
 					m2.on_tile_unloaded(key);
+					wmo.on_tile_unloaded(key);
 					liquid.on_tile_unloaded(key);
 				};
 
 				this._m2_renderer = m2;
+				this._wmo_renderer = wmo;
 				this._liquid_renderer = liquid;
 				this._terrain = terrain;
 
@@ -650,7 +693,7 @@ module.exports = {
 		},
 
 		_on_canvas_click(cx, cy) {
-			if (!this._m2_renderer || !core.view.config.mapViewerAllowModelSelection)
+			if (!core.view.config.mapViewerAllowModelSelection)
 				return;
 
 			const canvas = this.$refs.canvas;
@@ -661,14 +704,33 @@ module.exports = {
 			const ndc_y = 1 - ((cy - rect.top) / rect.height) * 2;
 
 			const ray = this._unproject_ray(ndc_x, ndc_y);
-			const hit = this._m2_renderer.pick(ray.origin, ray.dir);
+
+			// pick closest hit across M2 and WMO
+			const m2_hit = this._m2_renderer?.pick(ray.origin, ray.dir);
+			const wmo_hit = this._wmo_renderer?.pick(ray.origin, ray.dir);
+
+			let hit = null;
+			let source = null;
+
+			if (m2_hit && wmo_hit)
+				hit = m2_hit.t <= wmo_hit.t ? (source = 'm2', m2_hit) : (source = 'wmo', wmo_hit);
+			else if (m2_hit)
+				hit = (source = 'm2', m2_hit);
+			else if (wmo_hit)
+				hit = (source = 'wmo', wmo_hit);
+
+			// deselect the renderer that didn't win
+			if (source !== 'm2' && this._m2_renderer)
+				this._m2_renderer.deselect();
+
+			if (source !== 'wmo' && this._wmo_renderer)
+				this._wmo_renderer.deselect();
 
 			if (hit) {
 				const filename = listfile.getByIDOrUnknown(hit.file_data_id);
 				this.selected_model = { id: hit.file_data_id, path: filename };
 			} else {
 				this.selected_model = null;
-				this._m2_renderer.deselect();
 			}
 		},
 
@@ -722,6 +784,11 @@ module.exports = {
 			if (this._liquid_renderer) {
 				this._liquid_renderer.dispose();
 				this._liquid_renderer = null;
+			}
+
+			if (this._wmo_renderer) {
+				this._wmo_renderer.dispose();
+				this._wmo_renderer = null;
 			}
 
 			if (this._m2_renderer) {

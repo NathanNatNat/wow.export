@@ -137,5 +137,7 @@
 	"mapViewerSunIntensity": 100,
 	"mapViewerSunColor": "#fff2d9",
 	"mapViewerAllowModelSelection": true,
-	"mapViewerShowLiquids": true
+	"mapViewerShowLiquids": true,
+	"mapViewerShowWMOModels": true,
+	"mapViewerWMORenderDistance": 5000
 }
