@@ -173,13 +173,12 @@ void main() {
 	if (u_blend_mode <= 1)
 		final_opacity = 1.0;
 
-	// apply vertex color (MOCV baked lighting)
-	mat_diffuse *= v_color.rgb;
-
 	// lighting
 	vec3 lit;
 	if (u_apply_lighting != 0)
-		lit = calc_exterior_light(mat_diffuse, normalize(v_normal));
+		lit = calc_exterior_light(mat_diffuse, normalize(v_normal), v_color.rgb);
+	else if (u_lighting_enabled != 0)
+		lit = mat_diffuse * v_color.rgb;
 	else
 		lit = mat_diffuse;
 
