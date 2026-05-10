@@ -22,6 +22,9 @@ const MAX_OBJ0_CONCURRENT = 2;
 const MAX_WMO_CONCURRENT = 1;
 const UPLOAD_BUDGET_GROUPS = 2;
 const CAMERA_DIRTY_THRESHOLD_SQ = 33.33 * 33.33;
+const WMO_GROUP_INTERIOR = 0x2000;
+const MAX_PORTAL_DEPTH = 8;
+const PORTAL_SIDE_EPSILON = 1.5;
 
 // pos(3f) + normal(3f) + uv1(2f) + uv2(2f) + uv3(2f) + color1(4ub) + color2(4ub) = 56
 const WMO_VERTEX_STRIDE = 56;
@@ -441,6 +444,193 @@ function generate_doodad_placements(doodad_data, active_sets, wmo_matrix) {
 	return results;
 }
 
+/**
+ * extract and swizzle portal data from a loaded WMO root.
+ * swizzles planes from WoW [a,b,c,d] to viewer [a,c,-b,d].
+ */
+function extract_portal_data(wmo) {
+	if (!wmo.portalInfo || wmo.portalInfo.length === 0 || !wmo.mopr)
+		return null;
+
+	const portals = new Array(wmo.portalInfo.length);
+	for (let i = 0; i < wmo.portalInfo.length; i++) {
+		const p = wmo.portalInfo[i].plane;
+		portals[i] = new Float32Array([p[0], p[2], -p[1], p[3]]);
+	}
+
+	return { portals, refs: wmo.mopr };
+}
+
+/**
+ * transform a world-space point into WMO local space via inverse model matrix.
+ */
+function transform_point_to_local(world_pos, model_matrix) {
+	const m = model_matrix;
+	const m00 = m[0], m01 = m[4], m02 = m[8],  tx = m[12];
+	const m10 = m[1], m11 = m[5], m12 = m[9],  ty = m[13];
+	const m20 = m[2], m21 = m[6], m22 = m[10], tz = m[14];
+
+	const c00 = m11 * m22 - m12 * m21;
+	const c01 = m12 * m20 - m10 * m22;
+	const c02 = m10 * m21 - m11 * m20;
+	const c10 = m02 * m21 - m01 * m22;
+	const c11 = m00 * m22 - m02 * m20;
+	const c12 = m01 * m20 - m00 * m21;
+	const c20 = m01 * m12 - m02 * m11;
+	const c21 = m02 * m10 - m00 * m12;
+	const c22 = m00 * m11 - m01 * m10;
+
+	const det = m00 * c00 + m01 * c01 + m02 * c02;
+	if (Math.abs(det) < 1e-12)
+		return null;
+
+	const inv = 1.0 / det;
+	const ox = world_pos[0] - tx;
+	const oy = world_pos[1] - ty;
+	const oz = world_pos[2] - tz;
+
+	return new Float32Array([
+		(c00 * ox + c10 * oy + c20 * oz) * inv,
+		(c01 * ox + c11 * oy + c21 * oz) * inv,
+		(c02 * ox + c12 * oy + c22 * oz) * inv
+	]);
+}
+
+/**
+ * determine which WMO group the camera is inside.
+ * uses AABB containment + portal plane side tests.
+ * prefers interior groups over exterior.
+ */
+function find_camera_group(cam, portal_data) {
+	const { portals, refs, group_info } = portal_data;
+	const cx = cam[0], cy = cam[1], cz = cam[2];
+
+	let best = -1;
+	let best_interior = false;
+
+	for (let i = 0; i < group_info.length; i++) {
+		const gi = group_info[i];
+		if (!gi.bb_min || !gi.bb_max)
+			continue;
+
+		if (cx < gi.bb_min[0] || cx > gi.bb_max[0])
+			continue;
+		if (cy < gi.bb_min[1] || cy > gi.bb_max[1])
+			continue;
+		if (cz < gi.bb_min[2] || cz > gi.bb_max[2])
+			continue;
+
+		// verify camera is on correct side of all group portals
+		let inside = true;
+		for (let j = 0; j < gi.num_portals; j++) {
+			const ref = refs[gi.ofs_portals + j];
+			if (!ref)
+				continue;
+
+			const plane = portals[ref.portalIndex];
+			if (!plane)
+				continue;
+
+			const dot = plane[0] * cx + plane[1] * cy + plane[2] * cz + plane[3];
+			const correct = ref.side < 0 ? dot <= 0 : dot >= 0;
+
+			if (!correct && Math.abs(dot) > 0.01) {
+				inside = false;
+				break;
+			}
+		}
+
+		if (!inside)
+			continue;
+
+		const is_interior = !!(gi.flags & WMO_GROUP_INTERIOR);
+		if (is_interior || !best_interior) {
+			best = i;
+			best_interior = is_interior;
+		}
+	}
+
+	return best;
+}
+
+/**
+ * compute visible WMO group set via portal traversal.
+ * returns Set<groupIndex> or null if all groups are visible.
+ */
+function compute_visible_groups(cam, portal_data) {
+	const { portals, refs, group_info } = portal_data;
+	if (!portals || portals.length === 0)
+		return null;
+
+	const visible = new Set();
+	const visited = new Uint8Array(portals.length);
+	const cam_group = find_camera_group(cam, portal_data);
+
+	if (cam_group >= 0 && (group_info[cam_group].flags & WMO_GROUP_INTERIOR)) {
+		visible.add(cam_group);
+		traverse_portals(cam_group, cam, portal_data, visible, visited, 0);
+	} else {
+		// camera outside or in exterior group — all non-interior groups visible
+		for (let i = 0; i < group_info.length; i++) {
+			if (!(group_info[i].flags & WMO_GROUP_INTERIOR))
+				visible.add(i);
+		}
+
+		for (let i = 0; i < group_info.length; i++) {
+			if (!(group_info[i].flags & WMO_GROUP_INTERIOR))
+				traverse_portals(i, cam, portal_data, visible, visited, 0);
+		}
+	}
+
+	return visible;
+}
+
+function traverse_portals(group_idx, cam, portal_data, visible, visited, depth) {
+	if (depth >= MAX_PORTAL_DEPTH)
+		return;
+
+	const { portals, refs, group_info } = portal_data;
+	const gi = group_info[group_idx];
+	if (!gi)
+		return;
+
+	const cx = cam[0], cy = cam[1], cz = cam[2];
+
+	for (let i = 0; i < gi.num_portals; i++) {
+		const ref = refs[gi.ofs_portals + i];
+		if (!ref)
+			continue;
+
+		const portal_idx = ref.portalIndex;
+		if (portal_idx >= portals.length || visited[portal_idx])
+			continue;
+
+		const plane = portals[portal_idx];
+		const dot = plane[0] * cx + plane[1] * cy + plane[2] * cz + plane[3];
+		const correct_side = ref.side < 0 ? dot <= 0 : dot >= 0;
+
+		if (!correct_side && Math.abs(dot) > PORTAL_SIDE_EPSILON)
+			continue;
+
+		visited[portal_idx] = 1;
+
+		const dest = ref.groupIndex;
+		if (dest >= group_info.length)
+			continue;
+
+		if (group_info[dest].flags & WMO_GROUP_INTERIOR) {
+			visible.add(dest);
+			traverse_portals(dest, cam, portal_data, visible, visited, depth + 1);
+		} else {
+			// entering exterior from interior — add all non-interior groups
+			for (let j = 0; j < group_info.length; j++) {
+				if (!(group_info[j].flags & WMO_GROUP_INTERIOR))
+					visible.add(j);
+			}
+		}
+	}
+}
+
 class WMORenderer {
 	constructor(gl_context) {
 		this.ctx = gl_context;
@@ -578,6 +768,7 @@ class WMORenderer {
 				bounding_box: null,
 				texture_ids: null,
 				doodad_data: null,
+				portal_data: null,
 				ref_count: 0,
 				tile_placements: new Map(),
 				culled_instances: [],
@@ -672,6 +863,9 @@ class WMORenderer {
 				shader.set_uniform_mat4('u_model', false, inst.matrix);
 
 				for (const group of entry.groups) {
+					if (inst.visible_groups && !inst.visible_groups.has(group.group_index))
+						continue;
+
 					group.vao.bind();
 
 					for (const dc of group.draw_calls) {
@@ -901,6 +1095,7 @@ class WMORenderer {
 						bounding_box: null,
 						texture_ids: null,
 						doodad_data: null,
+						portal_data: null,
 						ref_count: 0,
 						tile_placements: new Map(),
 						culled_instances: [],
@@ -977,10 +1172,14 @@ class WMORenderer {
 					this._register_doodad_instances(file_data_id, tile_key);
 			}
 
+			// extract portal connectivity for visibility culling
+			const portal_data = extract_portal_data(wmo);
+
 			// collect material texture references
 			const { material_tex_ids, unique_textures } = collect_wmo_textures(wmo);
 
 			// load groups, build geometry + draw calls
+			const group_meta = [];
 			const group_data = [];
 			for (let i = 0; i < wmo.groupCount; i++) {
 				if (this._disposed || !this._model_cache.has(file_data_id))
@@ -988,6 +1187,18 @@ class WMORenderer {
 
 				try {
 					const group = await wmo.getGroup(i);
+
+					// collect per-group metadata for portal culling
+					const bb1 = group.boundingBox1;
+					const bb2 = group.boundingBox2;
+					group_meta.push({
+						flags: group.flags || 0,
+						bb_min: (bb1 && bb2) ? [bb1[0], bb1[2], -bb2[1]] : null,
+						bb_max: (bb1 && bb2) ? [bb2[0], bb2[2], -bb1[1]] : null,
+						ofs_portals: group.ofsPortals || 0,
+						num_portals: group.numPortals || 0
+					});
+
 					const geo = build_group_geometry(group, wmo.ambientColor ?? 0, wmo.flags ?? 0);
 					if (!geo)
 						continue;
@@ -996,10 +1207,19 @@ class WMORenderer {
 					if (draw_calls.length === 0)
 						continue;
 
-					group_data.push({ ...geo, draw_calls });
+					group_data.push({ ...geo, draw_calls, group_index: i });
 				} catch (e) {
+					group_meta.push({ flags: 0, bb_min: null, bb_max: null, ofs_portals: 0, num_portals: 0 });
 					log.write('Failed to load WMO group ' + i + ' for ' + file_data_id + ': ' + e.message);
 				}
+			}
+
+			// finalize portal data with per-group info
+			if (portal_data) {
+				portal_data.group_info = group_meta;
+				const p_entry = this._model_cache.get(file_data_id);
+				if (p_entry)
+					p_entry.portal_data = portal_data;
 			}
 
 			if (this._disposed || !this._model_cache.has(file_data_id)) {
@@ -1149,7 +1369,7 @@ class WMORenderer {
 
 		vao.set_index_buffer(geo.index_data);
 
-		entry.groups.push({ vao, draw_calls: geo.draw_calls });
+		entry.groups.push({ vao, draw_calls: geo.draw_calls, group_index: geo.group_index });
 	}
 
 	_rebuild_culled_lists(camera_pos) {
@@ -1181,6 +1401,14 @@ class WMORenderer {
 
 					if (dx * dx + dy * dy + dz * dz <= rd_sq)
 						culled.push(inst);
+				}
+			}
+
+			// compute per-instance portal visibility
+			if (entry.portal_data) {
+				for (const inst of culled) {
+					const cam_local = transform_point_to_local(camera_pos, inst.matrix);
+					inst.visible_groups = cam_local ? compute_visible_groups(cam_local, entry.portal_data) : null;
 				}
 			}
 
