@@ -72,6 +72,12 @@ class TerrainRenderer {
 		this.sun_color = new Float32Array([1.0, 0.95, 0.85]);
 		this.sun_intensity = 1.0;
 
+		this.fog_enabled = false;
+		this.fog_color = new Float32Array([0.5, 0.5, 0.5]);
+		this.fog_start = 1000;
+		this.fog_end = 3000;
+		this.camera_pos = new Float32Array([0, 0, 0]);
+
 		this._vao_pool = [];
 		this._frustum_planes = new Float32Array(24);
 		this._vp_matrix = new Float32Array(16);
@@ -197,6 +203,10 @@ class TerrainRenderer {
 	}
 
 	update(camera_pos) {
+		this.camera_pos[0] = camera_pos[0];
+		this.camera_pos[1] = camera_pos[1];
+		this.camera_pos[2] = camera_pos[2];
+
 		this._process_uploads();
 
 		const tx = Math.floor(32 - camera_pos[2] / TILE_SIZE);
@@ -1202,6 +1212,18 @@ class TerrainRenderer {
 		}
 	}
 
+	_set_fog_uniforms(shader) {
+		if (this.fog_enabled) {
+			shader.set_uniform_3fv('u_camera_pos', this.camera_pos);
+			shader.set_uniform_3fv('u_fog_color', this.fog_color);
+			shader.set_uniform_1f('u_fog_start', this.fog_start);
+			shader.set_uniform_1f('u_fog_end', this.fog_end);
+		} else {
+			shader.set_uniform_1f('u_fog_start', 999999.0);
+			shader.set_uniform_1f('u_fog_end', 999999.0);
+		}
+	}
+
 	render_full(view_matrix, projection_matrix) {
 		this._compute_frustum(view_matrix, projection_matrix);
 
@@ -1222,6 +1244,7 @@ class TerrainRenderer {
 			this.minimap_shader.set_uniform_3fv('u_light_dir', this.light_dir);
 			this.minimap_shader.set_uniform_3fv('u_sun_color', this.sun_color);
 			this.minimap_shader.set_uniform_1f('u_sun_intensity', this.sun_intensity);
+			this._set_fog_uniforms(this.minimap_shader);
 
 			for (const tile of this._tiles.values()) {
 				if (!tile.adt_tex || !this._is_tile_visible(tile, planes))
@@ -1290,6 +1313,7 @@ class TerrainRenderer {
 		shader.set_uniform_3fv('u_light_dir', this.light_dir);
 		shader.set_uniform_3fv('u_sun_color', this.sun_color);
 		shader.set_uniform_1f('u_sun_intensity', this.sun_intensity);
+		this._set_fog_uniforms(shader);
 
 		for (let i = 0; i < 8; i++)
 			shader.set_uniform_1i('u_tex' + i, i);
@@ -1358,6 +1382,7 @@ class TerrainRenderer {
 		this.shader.set_uniform_3fv('u_light_dir', this.light_dir);
 		this.shader.set_uniform_3fv('u_sun_color', this.sun_color);
 		this.shader.set_uniform_1f('u_sun_intensity', this.sun_intensity);
+		this._set_fog_uniforms(this.shader);
 
 		this._compute_frustum(view_matrix, projection_matrix);
 
@@ -1437,6 +1462,7 @@ class TerrainRenderer {
 		this.minimap_shader.set_uniform_3fv('u_light_dir', this.light_dir);
 		this.minimap_shader.set_uniform_3fv('u_sun_color', this.sun_color);
 		this.minimap_shader.set_uniform_1f('u_sun_intensity', this.sun_intensity);
+		this._set_fog_uniforms(this.minimap_shader);
 
 		this._compute_frustum(view_matrix, projection_matrix);
 
@@ -1468,6 +1494,7 @@ class TerrainRenderer {
 		this.minimap_shader.set_uniform_3fv('u_light_dir', this.light_dir);
 		this.minimap_shader.set_uniform_3fv('u_sun_color', this.sun_color);
 		this.minimap_shader.set_uniform_1f('u_sun_intensity', this.sun_intensity);
+		this._set_fog_uniforms(this.minimap_shader);
 
 		this._compute_frustum(view_matrix, projection_matrix);
 

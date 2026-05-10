@@ -8,6 +8,11 @@ uniform vec3 u_light_dir;
 uniform vec3 u_sun_color;
 uniform float u_sun_intensity;
 
+uniform vec3 u_camera_pos;
+uniform vec3 u_fog_color;
+uniform float u_fog_start;
+uniform float u_fog_end;
+
 out vec4 frag_color;
 
 const vec3 BASE_COLOR = vec3(0.6, 0.6, 0.6);
@@ -24,6 +29,10 @@ void main() {
 
 	float diffuse = max(n_dot_l, 0.0);
 	vec3 color = BASE_COLOR * (ambient + u_sun_color * diffuse * u_sun_intensity);
+
+	float dist = distance(v_position, u_camera_pos);
+	float fog = clamp((dist - u_fog_start) / (u_fog_end - u_fog_start), 0.0, 1.0);
+	color = mix(color, u_fog_color, fog);
 
 	frag_color = vec4(color, 1.0);
 }

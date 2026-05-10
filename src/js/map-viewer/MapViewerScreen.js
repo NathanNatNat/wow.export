@@ -27,7 +27,11 @@ const SECTIONS = [
 			{ type: 'slider', key: 'mapViewerRenderDistance', label: 'Render Distance', min: 1, max: 256, step: 1 },
 			{ type: 'checkbox', key: 'mapViewerShowM2Models', label: 'Show M2 Models' },
 			{ type: 'slider', key: 'mapViewerM2RenderDistance', label: 'M2 Render Distance', min: 50, max: 64000, step: 50 },
-			{ type: 'color', key: 'mapViewerSkyColor', label: 'Sky Colour' }
+			{ type: 'color', key: 'mapViewerSkyColor', label: 'Sky Colour' },
+			{ type: 'checkbox', key: 'mapViewerFogEnabled', label: 'Enable Fog' },
+			{ type: 'color', key: 'mapViewerFogColor', label: 'Fog Colour' },
+			{ type: 'slider', key: 'mapViewerFogStart', label: 'Fog Start', min: 0, max: 5000, step: 50 },
+			{ type: 'slider', key: 'mapViewerFogEnd', label: 'Fog End', min: 100, max: 10000, step: 50 }
 		]
 	},
 	{
@@ -210,6 +214,26 @@ module.exports = {
 				this._terrain.sun_color = hex_to_rgb(val);
 		},
 
+		'config.mapViewerFogEnabled'(val) {
+			if (this._terrain)
+				this._terrain.fog_enabled = val;
+		},
+
+		'config.mapViewerFogColor'(val) {
+			if (this._terrain)
+				this._terrain.fog_color = hex_to_rgb(val);
+		},
+
+		'config.mapViewerFogStart'(val) {
+			if (this._terrain)
+				this._terrain.fog_start = val;
+		},
+
+		'config.mapViewerFogEnd'(val) {
+			if (this._terrain)
+				this._terrain.fog_end = val;
+		},
+
 		'config.mapViewerShowM2Models'(val) {
 			if (this._m2_renderer)
 				this._m2_renderer.enabled = val;
@@ -384,9 +408,18 @@ module.exports = {
 					let m2_drawn = 0;
 					if (this._m2_renderer) {
 						this._m2_renderer.update(cam);
+
+						const fog_params = this._terrain.fog_enabled ? {
+							camera_pos: this._terrain.camera_pos,
+							fog_color: this._terrain.fog_color,
+							fog_start: this._terrain.fog_start,
+							fog_end: this._terrain.fog_end
+						} : null;
+
 						m2_drawn = this._m2_renderer.render(
 							this._camera.view_matrix, this._camera.projection_matrix,
-							this._terrain.light_dir, this._terrain.sun_color, this._terrain.sun_intensity
+							this._terrain.light_dir, this._terrain.sun_color, this._terrain.sun_intensity,
+							fog_params
 						);
 						this._gl_ctx.set_depth_test(true);
 					}
@@ -479,6 +512,11 @@ module.exports = {
 			this._terrain.light_dir = compute_light_dir(this.config.mapViewerSunAzimuth, this.config.mapViewerSunElevation);
 			this._terrain.sun_color = hex_to_rgb(this.config.mapViewerSunColor);
 			this._terrain.sun_intensity = this.config.mapViewerSunIntensity / 100;
+
+			this._terrain.fog_enabled = this.config.mapViewerFogEnabled;
+			this._terrain.fog_color = hex_to_rgb(this.config.mapViewerFogColor);
+			this._terrain.fog_start = this.config.mapViewerFogStart;
+			this._terrain.fog_end = this.config.mapViewerFogEnd;
 		},
 
 		_position_camera() {

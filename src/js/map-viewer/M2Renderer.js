@@ -216,7 +216,7 @@ class M2Renderer {
 			this._rebuild_instance_buffers(camera_pos);
 	}
 
-	render(view, proj, light_dir, sun_color, sun_intensity) {
+	render(view, proj, light_dir, sun_color, sun_intensity, fog_params) {
 		if (!this.enabled)
 			return 0;
 
@@ -229,6 +229,16 @@ class M2Renderer {
 		shader.set_uniform_3fv('u_light_dir', light_dir);
 		shader.set_uniform_3fv('u_sun_color', sun_color);
 		shader.set_uniform_1f('u_sun_intensity', sun_intensity);
+
+		if (fog_params) {
+			shader.set_uniform_3fv('u_camera_pos', fog_params.camera_pos);
+			shader.set_uniform_3fv('u_fog_color', fog_params.fog_color);
+			shader.set_uniform_1f('u_fog_start', fog_params.fog_start);
+			shader.set_uniform_1f('u_fog_end', fog_params.fog_end);
+		} else {
+			shader.set_uniform_1f('u_fog_start', 999999.0);
+			shader.set_uniform_1f('u_fog_end', 999999.0);
+		}
 
 		let drawn = 0;
 
