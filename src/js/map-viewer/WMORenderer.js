@@ -26,8 +26,8 @@ const WMO_GROUP_INTERIOR = 0x2000;
 const MAX_PORTAL_DEPTH = 8;
 const PORTAL_SIDE_EPSILON = 1.5;
 
-// pos(3f) + normal(3f) + uv1(2f) + uv2(2f) + uv3(2f) + color1(4ub) + color2(4ub) = 56
-const WMO_VERTEX_STRIDE = 56;
+// pos(3f) + normal(3f) + uv1(2f) + uv2(2f) + uv3(2f) + uv4(2f) + color1(4ub) + color2(4ub) + color3(4ub) = 68 bytes
+const WMO_VERTEX_STRIDE = 68;
 
 const BBOX_COLOR = new Float32Array([1, 0.8, 0]);
 const DEFAULT_CAMERA_POS = new Float32Array(3);
@@ -191,7 +191,7 @@ function fix_color_vertex_alpha(colors, amb_color, wmo_flags, group_flags, trans
 
 /**
  * build interleaved vertex data from a WMO group.
- * format: pos(3f) + normal(3f) + uv1(2f) + uv2(2f) + uv3(2f) + color1(4ub) + color2(4ub) = 56 bytes
+ * format: pos(3f) + normal(3f) + uv1(2f) + uv2(2f) + uv3(2f) + uv4(2f) + color1(4ub) + color2(4ub) + color3(4ub) = 68 bytes
  */
 function build_group_geometry(group, amb_color, wmo_flags) {
 	if (!group.vertices || !group.normals || !group.indices)
@@ -207,8 +207,11 @@ function build_group_geometry(group, amb_color, wmo_flags) {
 	const uvs1 = group.uvs?.[0];
 	const uvs2 = group.uvs?.[1];
 	const uvs3 = group.uvs?.[2];
+	const uvs4 = group.uvs?.[3];
+
 	const colors1 = group.vertexColours?.[0];
 	const colors2 = group.vertexColours?.[1];
+	const colors3 = group.colors2 ? group.colors2 : null;
 
 	fix_color_vertex_alpha(colors1, amb_color, wmo_flags, group.flags ?? 0, group.numBatchesA ?? 0, group.renderBatches);
 
@@ -246,24 +249,40 @@ function build_group_geometry(group, amb_color, wmo_flags) {
 			view.setFloat32(offset + 44, uvs3[uv + 1], true);
 		}
 
+		// uv4
+		if (uvs4) {
+			view.setFloat32(offset + 48, uvs4[uv], true);
+			view.setFloat32(offset + 52, uvs4[uv + 1], true);
+		}
+
 		// color1 (BGRA in file → RGBA swizzle)
 		if (colors1) {
-			view.setUint8(offset + 48, colors1[c + 2]);
-			view.setUint8(offset + 49, colors1[c + 1]);
-			view.setUint8(offset + 50, colors1[c]);
-			view.setUint8(offset + 51, colors1[c + 3]);
+			view.setUint8(offset + 56, colors1[c + 2]);
+			view.setUint8(offset + 57, colors1[c + 1]);
+			view.setUint8(offset + 58, colors1[c]);
+			view.setUint8(offset + 59, colors1[c + 3]);
 		} else {
-			view.setUint32(offset + 48, 0xFFFFFFFF);
+			view.setUint32(offset + 56, 0xFFFFFFFF);
 		}
 
 		// color2 (BGRA → RGBA)
 		if (colors2) {
-			view.setUint8(offset + 52, colors2[c + 2]);
-			view.setUint8(offset + 53, colors2[c + 1]);
-			view.setUint8(offset + 54, colors2[c]);
-			view.setUint8(offset + 55, colors2[c + 3]);
+			view.setUint8(offset + 60, colors2[c + 2]);
+			view.setUint8(offset + 61, colors2[c + 1]);
+			view.setUint8(offset + 62, colors2[c]);
+			view.setUint8(offset + 63, colors2[c + 3]);
 		} else {
-			view.setUint32(offset + 52, 0xFFFFFFFF);
+			view.setUint32(offset + 60, 0xFFFFFFFF);
+		}
+
+		// color3
+		if (colors3) {
+			view.setUint8(offset + 64, colors3[c]);
+			view.setUint8(offset + 65, colors3[c + 1]);
+			view.setUint8(offset + 66, colors3[c + 2]);
+			view.setUint8(offset + 67, colors3[c + 3]);
+		} else {
+			view.setUint32(offset + 64, 0xFFFFFFFF);
 		}
 	}
 
@@ -293,13 +312,13 @@ function build_group_draw_calls(group, materials, material_tex_ids) {
 				vertex_shader: 0,
 				pixel_shader: 0,
 				flags: 0,
-				tex_ids: [0, 0, 0]
+				tex_ids: [0, 0, 0, 0, 0, 0, 0, 0, 0]
 			});
 			continue;
 		}
 
 		const shader_info = WMOShaderMapper.WMOShaderMap[material.shader] ?? { VertexShader: 0, PixelShader: 0 };
-		const tex_ids = material_tex_ids.get(mat_id) ?? [0, 0, 0];
+		const tex_ids = material_tex_ids.get(mat_id) ?? [0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 		draw_calls.push({
 			start: batch.firstFace,
@@ -340,10 +359,23 @@ function collect_wmo_textures(wmo) {
 			tex_ids = [
 				listfile.getByFilename(wmo.textureNames[mat.texture1]) || 0,
 				listfile.getByFilename(wmo.textureNames[mat.texture2]) || 0,
-				listfile.getByFilename(wmo.textureNames[mat.texture3]) || 0
+				listfile.getByFilename(wmo.textureNames[mat.texture3]) || 0,
+				0, 0, 0, 0, 0, 0 // classic will never need more than 3 probably
 			];
 		} else {
 			tex_ids = [mat.texture1, mat.texture2, mat.texture3];
+
+			if(shader_info?.PixelShader == 19 || shader_info?.PixelShader == 20) {
+				tex_ids[3] = mat.color3;
+				tex_ids[4] = mat.flags3;
+				tex_ids[5] = mat.runtimeData[0];
+
+				if(shader_info.PixelShader == 20) {
+					tex_ids[6] = mat.runtimeData[1];
+					tex_ids[7] = mat.runtimeData[2];
+					tex_ids[8] = mat.runtimeData[3];
+				}
+			}
 		}
 
 		material_tex_ids.set(i, tex_ids);
@@ -842,9 +874,9 @@ class WMORenderer {
 		shader.set_uniform_mat4('u_view', false, view);
 		shader.set_uniform_mat4('u_projection', false, proj);
 
-		shader.set_uniform_1i('u_texture1', 0);
-		shader.set_uniform_1i('u_texture2', 1);
-		shader.set_uniform_1i('u_texture3', 2);
+		for(let i = 0; i < 9; i++) {
+			shader.set_uniform_1i('u_texture' + (i + 1), i);
+		}
 
 		set_scene_uniforms(shader, scene_params);
 
@@ -876,7 +908,7 @@ class WMORenderer {
 
 						ctx.apply_blend_mode(dc.blend_mode);
 
-						for (let t = 0; t < 3; t++) {
+						for (let t = 0; t < dc.tex_ids.length; t++) {
 							const fid = dc.tex_ids[t];
 							const cached = fid > 0 ? this._texture_cache.get(fid) : null;
 							const tex = cached?.texture ?? this._default_texture;
@@ -1359,13 +1391,21 @@ class WMORenderer {
 		gl.enableVertexAttribArray(8);
 		gl.vertexAttribPointer(8, 2, gl.FLOAT, false, stride, 40);
 
-		// color1(4ub) @ 48
-		gl.enableVertexAttribArray(6);
-		gl.vertexAttribPointer(6, 4, gl.UNSIGNED_BYTE, true, stride, 48);
+		// uv4(2f) @ 48
+		gl.enableVertexAttribArray(9);
+		gl.vertexAttribPointer(9, 2, gl.FLOAT, false, stride, 48);
 
-		// color2(4ub) @ 52
+		// color1(4ub) @ 56
+		gl.enableVertexAttribArray(6);
+		gl.vertexAttribPointer(6, 4, gl.UNSIGNED_BYTE, true, stride, 56);
+
+		// color2(4ub) @ 60
 		gl.enableVertexAttribArray(7);
-		gl.vertexAttribPointer(7, 4, gl.UNSIGNED_BYTE, true, stride, 52);
+		gl.vertexAttribPointer(7, 4, gl.UNSIGNED_BYTE, true, stride, 60);
+
+		// color3(4ub) @ 64
+		gl.enableVertexAttribArray(10);
+		gl.vertexAttribPointer(10, 4, gl.UNSIGNED_BYTE, true, stride, 64);
 
 		vao.set_index_buffer(geo.index_data);
 

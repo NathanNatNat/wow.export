@@ -2,18 +2,29 @@
 precision highp float;
 precision highp int;
 
+// inputs from vertex shader
 in vec2 v_texcoord;
 in vec2 v_texcoord2;
 in vec2 v_texcoord3;
+in vec2 v_texcoord4;
 in vec3 v_normal;
 in vec3 v_position;
 in vec4 v_color;
 in vec4 v_color2;
+in vec4 v_color3;
 
+// textures
 uniform sampler2D u_texture1;
 uniform sampler2D u_texture2;
 uniform sampler2D u_texture3;
+uniform sampler2D u_texture4;
+uniform sampler2D u_texture5;
+uniform sampler2D u_texture6;
+uniform sampler2D u_texture7;
+uniform sampler2D u_texture8;
+uniform sampler2D u_texture9;
 
+// material parameters
 uniform int u_pixel_shader;
 uniform int u_blend_mode;
 uniform int u_apply_lighting;
@@ -159,7 +170,47 @@ void main() {
 			break;
 		}
 
-		default: // MapObjLod / MapObjParallax / MapObjDFShader / fallback
+		case 18: // MapObjLod
+			mat_diffuse = tex1.rgb;
+			final_opacity = tex1.a;
+			break;
+
+		case 19: // MapObjParallax (simplified)
+			mat_diffuse = tex1.rgb;
+			final_opacity = tex1.a;
+			break;
+
+		case 20: { // MapObjUnkShader
+			vec4 tex2_20 = texture(u_texture2, v_texcoord);
+			vec4 tex3_20 = texture(u_texture3, v_texcoord2);
+			vec4 tex4_20 = texture(u_texture4, v_texcoord3);
+			vec4 tex5_20 = texture(u_texture5, v_texcoord4);
+			vec4 tex6_20 = texture(u_texture6, v_texcoord);
+			vec4 tex7_20 = texture(u_texture7, v_texcoord2);
+			vec4 tex8_20 = texture(u_texture8, v_texcoord3);
+			vec4 tex9_20 = texture(u_texture9, v_texcoord4);
+
+			float second_color_sum = dot(v_color3.bgr, vec3(1.0));
+			vec4 weights = vec4(v_color3.bgr, 1.0 - clamp(second_color_sum, 0.0, 1.0));
+			vec4 heights = max(vec4(tex6_20.a, tex7_20.a, tex8_20.a, tex9_20.a), 0.004);
+			vec4 alpha_vec = weights * heights;
+			float weights_max = max(alpha_vec.r, max(alpha_vec.g, max(alpha_vec.b, alpha_vec.a)));
+			vec4 alpha_vec2 = (1.0 - clamp(vec4(weights_max) - alpha_vec, 0.0, 1.0)) * alpha_vec;
+			vec4 alpha_normalized = alpha_vec2 * (1.0 / dot(alpha_vec2, vec4(1.0)));
+
+			vec4 tex_mixed = tex2_20 * alpha_normalized.r +
+							tex3_20 * alpha_normalized.g +
+							tex4_20 * alpha_normalized.b +
+							tex5_20 * alpha_normalized.a;
+
+			vec4 env_tex = vec4(0.0); // env texture would use posToTexCoord - simplified here
+			emissive = (tex_mixed.a * env_tex.rgb) * tex_mixed.rgb;
+			mat_diffuse = mix(tex_mixed.rgb, vec3(0.0), v_color3.a);
+			final_opacity = tex_mixed.a;
+			break;
+		}
+		
+		default: // fallback
 			mat_diffuse = tex1.rgb;
 			final_opacity = tex1.a;
 			break;
