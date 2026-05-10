@@ -10,6 +10,7 @@ const WMORenderer = require('./WMORenderer');
 const LiquidRenderer = require('./LiquidRenderer');
 const FogDataProvider = require('./FogDataProvider');
 const SkyRenderer = require('./SkyRenderer');
+const SkyboxM2Renderer = require('./SkyboxM2Renderer');
 const Minimap = require('./Minimap');
 
 const TILE_SIZE = constants.GAME.TILE_SIZE;
@@ -439,9 +440,9 @@ module.exports = {
 					// update fog/sky data before rendering
 					this._update_fog(cam);
 
-					// render sky dome before terrain (depth off, draws behind everything)
+					// render sky dome + M2 skybox before terrain
 					if (this._sky_renderer && this.config.mapViewerEnableSkybox)
-						this._update_and_render_sky();
+						this._update_and_render_sky(cam, dt);
 
 					let visible;
 					if (this.texture_mode === 'Wireframe') {
@@ -629,6 +630,7 @@ module.exports = {
 
 				// sky renderer
 				this._sky_renderer = new SkyRenderer(this._gl_ctx);
+				this._skybox_m2 = new SkyboxM2Renderer(this._gl_ctx);
 
 				// fog/sky/lighting data provider (shared DB2 tables)
 				this._fog_provider = new FogDataProvider(map_id);
@@ -686,7 +688,7 @@ module.exports = {
 			}
 		},
 
-		_update_and_render_sky() {
+		_update_and_render_sky(cam, dt) {
 			if (!this._fog_provider || !this._fog_provider.loaded)
 				return;
 
@@ -698,6 +700,18 @@ module.exports = {
 			this._gl_ctx.set_clear_color(horizon[0], horizon[1], horizon[2], 1);
 
 			this._sky_renderer.render(this._camera.view_matrix, this._camera.projection_matrix);
+
+			// render M2 skybox model on top of procedural dome
+			if (this._skybox_m2) {
+				const skybox_info = this._fog_provider.skybox_info;
+				if (skybox_info)
+					this._skybox_m2.set_model(skybox_info.file_data_id, skybox_info.flags);
+				else
+					this._skybox_m2.set_model(0, 0);
+
+				this._skybox_m2.update(cam, dt, this.time_of_day);
+				this._skybox_m2.render(this._camera.view_matrix, this._camera.projection_matrix);
+			}
 		},
 
 		_position_camera() {
@@ -851,6 +865,11 @@ module.exports = {
 			if (this._sky_renderer) {
 				this._sky_renderer.dispose();
 				this._sky_renderer = null;
+			}
+
+			if (this._skybox_m2) {
+				this._skybox_m2.dispose();
+				this._skybox_m2 = null;
 			}
 
 			if (this._liquid_renderer) {

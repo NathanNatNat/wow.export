@@ -17,6 +17,7 @@ class FogDataProvider {
 		this._default_light = null;
 		this._zone_lights = [];   // ZoneLight polygons for this map
 		this._light_data_cache = new Map(); // lightParamId -> sorted LightData rows
+		this._skybox_cache = new Map(); // lightParamId -> { file_data_id, flags }
 
 		// last computed state
 		this._last_pos = [NaN, NaN, NaN];
@@ -25,6 +26,7 @@ class FogDataProvider {
 		this._sky_colors = create_default_sky_colors();
 		this._light_uniforms = create_default_light_uniforms();
 		this._liquid_colors = create_default_liquid_colors();
+		this._skybox_info = null; // { file_data_id, flags } or null
 
 		// public state
 		this.time_of_day = 720; // noon (0-2880, half-minutes)
@@ -50,6 +52,10 @@ class FogDataProvider {
 		return this._liquid_colors;
 	}
 
+	get skybox_info() {
+		return this._skybox_info;
+	}
+
 	async load() {
 		if (this._loaded || this._loading || this._map_id == null)
 			return;
@@ -57,18 +63,20 @@ class FogDataProvider {
 		this._loading = true;
 
 		try {
-			const [light_table, light_data_table, light_params_table, zone_light_table, zone_light_point_table] = await Promise.all([
+			const [light_table, light_data_table, light_params_table, zone_light_table, zone_light_point_table, light_skybox_table] = await Promise.all([
 				db2.preload.Light(),
 				db2.preload.LightData(),
 				db2.preload.LightParams(),
 				db2.preload.ZoneLight(),
-				db2.preload.ZoneLightPoint()
+				db2.preload.ZoneLightPoint(),
+				db2.preload.LightSkybox()
 			]);
 
 			this._index_lights(light_table);
 			this._index_zone_lights(zone_light_table, zone_light_point_table);
 			this._light_data_table = light_data_table;
 			this._light_params_table = light_params_table;
+			this._light_skybox_table = light_skybox_table;
 
 			this._loaded = true;
 		} catch (e) {
@@ -200,8 +208,12 @@ class FogDataProvider {
 			this._sky_colors = create_default_sky_colors();
 			this._light_uniforms = create_default_light_uniforms();
 			this._liquid_colors = create_default_liquid_colors();
+			this._skybox_info = null;
 			return;
 		}
+
+		// resolve skybox from highest-blend light param
+		this._skybox_info = this._resolve_skybox(blends);
 
 		// compute fog + sky + lighting + liquid result for each blend, then combine
 		let result = null;
@@ -234,6 +246,7 @@ class FogDataProvider {
 			this._sky_colors = create_default_sky_colors();
 			this._light_uniforms = create_default_light_uniforms();
 			this._liquid_colors = create_default_liquid_colors();
+			this._skybox_info = null;
 			return;
 		}
 
@@ -351,6 +364,50 @@ class FogDataProvider {
 		}
 
 		return result;
+	}
+
+	_resolve_skybox(blends) {
+		// find highest-blend light param that has a skybox model
+		let best = null;
+		let best_blend = -1;
+
+		for (const { light_param_id, blend } of blends) {
+			if (light_param_id <= 0 || blend <= best_blend)
+				continue;
+
+			let info = this._skybox_cache.get(light_param_id);
+			if (info === undefined) {
+				info = this._lookup_skybox(light_param_id);
+				this._skybox_cache.set(light_param_id, info);
+			}
+
+			if (info && info.file_data_id > 0) {
+				best = info;
+				best_blend = blend;
+			}
+		}
+
+		return best;
+	}
+
+	_lookup_skybox(light_param_id) {
+		const lp_row = this._light_params_table?.rows?.get(light_param_id);
+		if (!lp_row)
+			return null;
+
+		const skybox_id = lp_row.LightSkyboxID ?? 0;
+		if (skybox_id <= 0)
+			return null;
+
+		const skybox_row = this._light_skybox_table?.rows?.get(skybox_id);
+		if (!skybox_row)
+			return null;
+
+		const file_data_id = skybox_row.SkyboxFileDataID ?? 0;
+		if (file_data_id <= 0)
+			return null;
+
+		return { file_data_id, flags: skybox_row.Flags ?? 0 };
 	}
 }
 
