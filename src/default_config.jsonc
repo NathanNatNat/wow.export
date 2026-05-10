@@ -121,7 +121,7 @@
 	"showZoneOverlays": true,
 	"allowCacheCollection": true,
 	"machineId": null,
-	"mapViewerRenderDistance": 8,
+	"mapViewerRenderDistance": 4,
 	"mapViewerShowM2Models": true,
 	"mapViewerM2RenderDistance": 2000,
 	"mapViewerFlySpeed": 200,
