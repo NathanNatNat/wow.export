@@ -26,7 +26,8 @@ const float PI = 3.14159265359;
 const vec3 SKY_COLOR = vec3(0.4, 0.5, 0.7);
 const vec3 GROUND_COLOR = vec3(0.25, 0.2, 0.15);
 const float AMBIENT = 0.25;
-const float LIQUID_ALPHA = 0.7;
+const float LIQUID_ALPHA_SHALLOW = 0.4;
+const float LIQUID_ALPHA_DEEP = 0.8;
 
 vec2 rotate_z(vec2 v, float angle) {
 	float s = sin(angle);
@@ -69,5 +70,6 @@ void main() {
 
 	diffuse = apply_fog(diffuse, v_position, u_camera_pos);
 
-	frag_color = vec4(diffuse, LIQUID_ALPHA);
+	float alpha = mix(LIQUID_ALPHA_SHALLOW, LIQUID_ALPHA_DEEP, v_depth);
+	frag_color = vec4(diffuse, alpha);
 }
