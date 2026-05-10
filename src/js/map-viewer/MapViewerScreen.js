@@ -13,6 +13,7 @@ const SkyRenderer = require('./SkyRenderer');
 const Minimap = require('./Minimap');
 
 const TILE_SIZE = constants.GAME.TILE_SIZE;
+const MAP_SIZE = constants.GAME.MAP_SIZE;
 const GRID_COLOR = new Float32Array([0x57 / 255, 0xAF / 255, 0xE2 / 255]);
 const CHUNK_GRID_COLOR = new Float32Array([0x3D / 255, 0x7A / 255, 0x9E / 255]);
 
@@ -689,10 +690,25 @@ module.exports = {
 		},
 
 		_position_camera() {
-			const center = this._terrain.map_center;
-			this._camera.position[0] = center[0];
+			const selection = core.view.mapViewerSelection;
+			let target_x, target_z;
+
+			if (selection.length > 0) {
+				const index = selection[selection.length - 1];
+				const wdt_x = index % MAP_SIZE;
+				const wdt_y = Math.floor(index / MAP_SIZE);
+
+				target_x = (31.5 - wdt_y) * TILE_SIZE;
+				target_z = (31.5 - wdt_x) * TILE_SIZE;
+			} else {
+				const center = this._terrain.map_center;
+				target_x = center[0];
+				target_z = center[2];
+			}
+
+			this._camera.position[0] = target_x;
 			this._camera.position[1] = 500;
-			this._camera.position[2] = center[2];
+			this._camera.position[2] = target_z;
 			this._controls.pitch = -0.6;
 			this._controls.yaw = 0;
 			this._height_above_terrain = 500;
