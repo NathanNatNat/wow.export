@@ -149,6 +149,7 @@ module.exports = {
 			<div class="mv-shortcuts">
 				<span class="mv-shortcut"><kbd>Esc</kbd> Exit Map</span>
 				<span class="mv-shortcut"><kbd>Alt+Z</kbd> Hide UI</span>
+				<span class="mv-shortcut"><kbd>[</kbd> <kbd>]</kbd> Fly Speed</span>
 			</div>
 		</template>
 	</div>`,
@@ -277,6 +278,10 @@ module.exports = {
 				this.close();
 			else if (e.altKey && e.key === 'z')
 				this.show_ui = !this.show_ui;
+			else if (e.key === '[')
+				core.view.config.mapViewerFlySpeed = Math.max(10, core.view.config.mapViewerFlySpeed - 10);
+			else if (e.key === ']')
+				core.view.config.mapViewerFlySpeed = Math.min(2000, core.view.config.mapViewerFlySpeed + 10);
 		};
 		document.addEventListener('keydown', this._key_handler);
 
