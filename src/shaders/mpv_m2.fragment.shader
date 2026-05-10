@@ -25,11 +25,10 @@ uniform vec3 u_sun_color;
 uniform float u_sun_intensity;
 
 uniform vec3 u_camera_pos;
-uniform vec3 u_fog_color;
-uniform float u_fog_start;
-uniform float u_fog_end;
 
 out vec4 frag_color;
+
+#include "mpv_fog.inc.glsl"
 
 const vec3 SKY_AMBIENT = vec3(0.6, 0.65, 0.7);
 const vec3 GROUND_AMBIENT = vec3(0.35, 0.3, 0.25);
@@ -315,11 +314,7 @@ void main() {
 		discard;
 
 	vec3 lit_color = calc_lighting(mat_diffuse) + specular;
-
-	// fog
-	float dist = distance(v_position, u_camera_pos);
-	float fog = clamp((dist - u_fog_start) / (u_fog_end - u_fog_start), 0.0, 1.0);
-	lit_color = mix(lit_color, u_fog_color, fog);
+	lit_color = apply_fog(lit_color, v_position, u_camera_pos);
 
 	frag_color = vec4(lit_color, final_opacity);
 }

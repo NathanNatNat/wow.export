@@ -16,13 +16,11 @@ uniform float u_time;
 uniform vec3 u_light_dir;
 uniform vec3 u_sun_color;
 uniform float u_sun_intensity;
-
 uniform vec3 u_camera_pos;
-uniform vec3 u_fog_color;
-uniform float u_fog_start;
-uniform float u_fog_end;
 
 out vec4 frag_color;
+
+#include "mpv_fog.inc.glsl"
 
 const float PI = 3.14159265359;
 const vec3 SKY_COLOR = vec3(0.4, 0.5, 0.7);
@@ -46,28 +44,21 @@ vec2 get_scroll_offset(float time, vec2 speed) {
 }
 
 void main() {
-	// base color from liquid type
 	vec3 base_color = u_liquid_color;
 
-	// animate UVs based on material type
 	vec2 uv = v_texcoord;
 	if (u_material_id == 1 || u_material_id == 3) {
-		// water: scale then rotate
 		uv *= u_float0;
 		uv = rotate_z(uv, u_float1 * PI / 180.0);
 	} else if (u_material_id == 2 || u_material_id == 4) {
-		// magma: scroll over time
 		uv += get_scroll_offset(u_time, vec2(u_float0, u_float1));
 	}
 
-	// sample texture and combine
 	vec3 tex_color = texture(u_texture, uv).rgb;
 	vec3 diffuse = base_color + tex_color;
 
-	// normal for liquid surfaces is always up
 	vec3 n = vec3(0.0, 1.0, 0.0);
 
-	// apply lighting (magma is self-illuminated)
 	if (u_material_id != 2 && u_material_id != 4) {
 		float n_dot_l = dot(n, u_light_dir);
 		float sky_factor = 0.5 + 0.5 * n.y;
@@ -76,10 +67,7 @@ void main() {
 		diffuse = diffuse * (ambient + u_sun_color * diff * u_sun_intensity);
 	}
 
-	// fog
-	float dist = distance(v_position, u_camera_pos);
-	float fog = clamp((dist - u_fog_start) / (u_fog_end - u_fog_start), 0.0, 1.0);
-	diffuse = mix(diffuse, u_fog_color, fog);
+	diffuse = apply_fog(diffuse, v_position, u_camera_pos);
 
 	frag_color = vec4(diffuse, LIQUID_ALPHA);
 }

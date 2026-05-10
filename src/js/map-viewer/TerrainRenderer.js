@@ -73,9 +73,7 @@ class TerrainRenderer {
 		this.sun_intensity = 1.0;
 
 		this.fog_enabled = false;
-		this.fog_color = new Float32Array([0.5, 0.5, 0.5]);
-		this.fog_start = 1000;
-		this.fog_end = 3000;
+		this.fog_uniforms = null;
 		this.camera_pos = new Float32Array([0, 0, 0]);
 
 		this._vao_pool = [];
@@ -1219,14 +1217,26 @@ class TerrainRenderer {
 	}
 
 	_set_fog_uniforms(shader) {
-		if (this.fog_enabled) {
-			shader.set_uniform_3fv('u_camera_pos', this.camera_pos);
-			shader.set_uniform_3fv('u_fog_color', this.fog_color);
-			shader.set_uniform_1f('u_fog_start', this.fog_start);
-			shader.set_uniform_1f('u_fog_end', this.fog_end);
+		shader.set_uniform_3fv('u_camera_pos', this.camera_pos);
+
+		const fog = this.fog_uniforms;
+		if (this.fog_enabled && fog) {
+			shader.set_uniform_1f('u_fog_enabled', fog.enabled);
+			shader.set_uniform_4fv('u_fog_density_params', fog.density_params);
+			shader.set_uniform_4fv('u_fog_height_plane', fog.height_plane);
+			shader.set_uniform_4fv('u_fog_color_height_rate', fog.color_height_rate);
+			shader.set_uniform_4fv('u_fog_hdensity_end_color', fog.hdensity_end_color);
+			shader.set_uniform_4fv('u_fog_sun_angle_color', fog.sun_angle_color);
+			shader.set_uniform_4fv('u_fog_hcolor_end_dist', fog.hcolor_end_dist);
+			shader.set_uniform_4fv('u_fog_sun_pct_str', fog.sun_pct_str);
+			shader.set_uniform_4fv('u_fog_sun_dir_z_scalar', fog.sun_dir_z_scalar);
+			shader.set_uniform_4fv('u_fog_height_coeff', fog.height_coeff);
+			shader.set_uniform_4fv('u_fog_main_coeff', fog.main_coeff);
+			shader.set_uniform_4fv('u_fog_hdensity_coeff', fog.hdensity_coeff);
+			shader.set_uniform_4fv('u_fog_distances', fog.distances);
+			shader.set_uniform_4fv('u_fog_hend_color_offset', fog.hend_color_offset);
 		} else {
-			shader.set_uniform_1f('u_fog_start', 999999.0);
-			shader.set_uniform_1f('u_fog_end', 999999.0);
+			shader.set_uniform_1f('u_fog_enabled', 0.0);
 		}
 	}
 

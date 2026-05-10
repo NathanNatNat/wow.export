@@ -7,6 +7,7 @@ const FreeCameraControls = require('./FreeCameraControls');
 const TerrainRenderer = require('./TerrainRenderer');
 const M2Renderer = require('./M2Renderer');
 const LiquidRenderer = require('./LiquidRenderer');
+const FogDataProvider = require('./FogDataProvider');
 const Minimap = require('./Minimap');
 
 const TILE_SIZE = constants.GAME.TILE_SIZE;
@@ -33,9 +34,7 @@ const SECTIONS = [
 			{ type: 'checkbox', key: 'mapViewerShowLiquids', label: 'Show Liquids' },
 			{ type: 'color', key: 'mapViewerSkyColor', label: 'Sky Colour' },
 			{ type: 'checkbox', key: 'mapViewerFogEnabled', label: 'Enable Fog' },
-			{ type: 'color', key: 'mapViewerFogColor', label: 'Fog Colour' },
-			{ type: 'slider', key: 'mapViewerFogStart', label: 'Fog Start', min: 0, max: 5000, step: 50 },
-			{ type: 'slider', key: 'mapViewerFogEnd', label: 'Fog End', min: 100, max: 10000, step: 50 }
+			{ type: 'slider', data_key: 'time_of_day', label: 'Time of Day', min: 0, max: 2880, step: 1 }
 		]
 	},
 	{
@@ -127,7 +126,7 @@ module.exports = {
 										:value="get_ctrl_value(ctrl)"
 										@input="set_ctrl_value(ctrl, Number($event.target.value))"
 									/>
-									<span class="mv-panel-value">{{ get_ctrl_value(ctrl) }}</span>
+									<span class="mv-panel-value">{{ format_ctrl_value(ctrl) }}</span>
 								</div>
 								<div v-if="ctrl.type === 'color'" class="mv-panel-color-row">
 									<label class="mv-panel-label">{{ ctrl.label }}</label>
@@ -172,7 +171,8 @@ module.exports = {
 			full_lod_distance: 12,
 			render_holes: true,
 			show_adt_bounds: false,
-			show_chunk_bounds: false
+			show_chunk_bounds: false,
+			time_of_day: 1440
 		};
 	},
 
@@ -224,21 +224,15 @@ module.exports = {
 		'config.mapViewerFogEnabled'(val) {
 			if (this._terrain)
 				this._terrain.fog_enabled = val;
-		},
 
-		'config.mapViewerFogColor'(val) {
-			if (this._terrain)
-				this._terrain.fog_color = hex_to_rgb(val);
-		},
+			if (val && this._fog_provider && !this._fog_provider.loaded)
+				this._fog_provider.load();
 
-		'config.mapViewerFogStart'(val) {
-			if (this._terrain)
-				this._terrain.fog_start = val;
-		},
-
-		'config.mapViewerFogEnd'(val) {
-			if (this._terrain)
-				this._terrain.fog_end = val;
+			// restore sky color when fog disabled
+			if (!val && this._gl_ctx) {
+				const c = hex_to_rgb(this.config.mapViewerSkyColor);
+				this._gl_ctx.set_clear_color(c[0], c[1], c[2], 1);
+			}
 		},
 
 		'config.mapViewerShowM2Models'(val) {
@@ -337,6 +331,16 @@ module.exports = {
 			return this.config[ctrl.key];
 		},
 
+		format_ctrl_value(ctrl) {
+			const val = this.get_ctrl_value(ctrl);
+			if (ctrl.data_key === 'time_of_day') {
+				const hours = Math.floor(val / 120);
+				const minutes = Math.floor((val % 120) / 2);
+				return String(hours).padStart(2, '0') + ':' + String(minutes).padStart(2, '0');
+			}
+			return val;
+		},
+
 		set_ctrl_value(ctrl, value) {
 			if (ctrl.data_key)
 				this[ctrl.data_key] = value;
@@ -406,6 +410,9 @@ module.exports = {
 					const ground = terrain_h !== null ? terrain_h : 0;
 					this._height_above_terrain = cam[1] - ground;
 
+					// update fog before rendering
+					this._update_fog(cam);
+
 					let visible;
 					if (this.texture_mode === 'Wireframe') {
 						const sky = hex_to_rgb(core.view.config.mapViewerSkyColor);
@@ -425,22 +432,21 @@ module.exports = {
 					if (this.show_adt_bounds)
 						this._terrain.render_grid(this._camera.view_matrix, this._camera.projection_matrix, GRID_COLOR);
 
+					// build shared fog params for sub-renderers
+					const fog_params = this._terrain.fog_enabled && this._terrain.fog_uniforms ? {
+						camera_pos: this._terrain.camera_pos,
+						fog_uniforms: this._terrain.fog_uniforms
+					} : null;
+
 					// liquids
 					let liquid_drawn = 0;
 					if (this._liquid_renderer) {
 						this._liquid_renderer.update();
 
-						const liq_fog = this._terrain.fog_enabled ? {
-							camera_pos: this._terrain.camera_pos,
-							fog_color: this._terrain.fog_color,
-							fog_start: this._terrain.fog_start,
-							fog_end: this._terrain.fog_end
-						} : null;
-
 						liquid_drawn = this._liquid_renderer.render(
 							this._camera.view_matrix, this._camera.projection_matrix,
 							this._terrain.light_dir, this._terrain.sun_color, this._terrain.sun_intensity,
-							liq_fog
+							fog_params
 						);
 						this._gl_ctx.set_depth_test(true);
 					}
@@ -449,13 +455,6 @@ module.exports = {
 					let m2_drawn = 0;
 					if (this._m2_renderer) {
 						this._m2_renderer.update(cam);
-
-						const fog_params = this._terrain.fog_enabled ? {
-							camera_pos: this._terrain.camera_pos,
-							fog_color: this._terrain.fog_color,
-							fog_start: this._terrain.fog_start,
-							fog_end: this._terrain.fog_end
-						} : null;
 
 						m2_drawn = this._m2_renderer.render(
 							this._camera.view_matrix, this._camera.projection_matrix,
@@ -548,6 +547,12 @@ module.exports = {
 				this._m2_renderer = m2;
 				this._liquid_renderer = liquid;
 				this._terrain = terrain;
+
+				// fog data provider (lazy-loaded when fog is enabled)
+				this._fog_provider = new FogDataProvider(map_id);
+				if (core.view.config.mapViewerFogEnabled)
+					this._fog_provider.load();
+
 				this._apply_sun_settings();
 				this._position_camera();
 				this._init_minimap();
@@ -570,11 +575,34 @@ module.exports = {
 			this._terrain.light_dir = compute_light_dir(this.config.mapViewerSunAzimuth, this.config.mapViewerSunElevation);
 			this._terrain.sun_color = hex_to_rgb(this.config.mapViewerSunColor);
 			this._terrain.sun_intensity = this.config.mapViewerSunIntensity / 100;
-
 			this._terrain.fog_enabled = this.config.mapViewerFogEnabled;
-			this._terrain.fog_color = hex_to_rgb(this.config.mapViewerFogColor);
-			this._terrain.fog_start = this.config.mapViewerFogStart;
-			this._terrain.fog_end = this.config.mapViewerFogEnd;
+		},
+
+		_update_fog(cam) {
+			if (!this._fog_provider || !this._terrain.fog_enabled)
+				return;
+
+			if (!this._fog_provider.loaded)
+				return;
+
+			this._fog_provider.time_of_day = this.time_of_day;
+			this._fog_provider.update(cam);
+
+			const uniforms = this._fog_provider.fog_uniforms;
+
+			// inject sun direction into fog uniforms
+			const light_dir = this._terrain.light_dir;
+			uniforms.sun_dir_z_scalar[0] = light_dir[0];
+			uniforms.sun_dir_z_scalar[1] = light_dir[1];
+			uniforms.sun_dir_z_scalar[2] = light_dir[2];
+
+			this._terrain.fog_uniforms = uniforms;
+
+			// update sky color to match fog color when fog is enabled
+			if (uniforms.enabled > 0.5) {
+				const fog_color = uniforms.color_height_rate;
+				this._gl_ctx.set_clear_color(fog_color[0], fog_color[1], fog_color[2], 1);
+			}
 		},
 
 		_position_camera() {

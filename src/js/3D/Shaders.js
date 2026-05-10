@@ -33,6 +33,19 @@ const source_cache = new Map();
 const active_programs = new Map();
 
 /**
+ * Process #include "filename" directives in shader source
+ * @param {string} source
+ * @param {string} shader_path
+ * @returns {string}
+ */
+function process_includes(source, shader_path) {
+	return source.replace(/^#include\s+"([^"]+)"\s*$/gm, (match, file) => {
+		const include_path = path.join(shader_path, file);
+		return fs.readFileSync(include_path, 'utf8');
+	});
+}
+
+/**
  * Load shader source from disk (cached)
  * @param {string} name
  * @returns {{ vert: string, frag: string }}
@@ -46,8 +59,8 @@ function get_source(name) {
 		throw new Error(`Unknown shader: ${name}`);
 
 	const shader_path = constants.SHADER_PATH;
-	const vert = fs.readFileSync(path.join(shader_path, manifest.vert), 'utf8');
-	const frag = fs.readFileSync(path.join(shader_path, manifest.frag), 'utf8');
+	const vert = process_includes(fs.readFileSync(path.join(shader_path, manifest.vert), 'utf8'), shader_path);
+	const frag = process_includes(fs.readFileSync(path.join(shader_path, manifest.frag), 'utf8'), shader_path);
 
 	const sources = { vert, frag };
 	source_cache.set(name, sources);
