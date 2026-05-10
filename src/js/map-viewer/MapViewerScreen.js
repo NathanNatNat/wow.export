@@ -40,6 +40,7 @@ const SECTIONS = [
 			{ type: 'checkbox', key: 'mapViewerShowLiquids', label: 'Show Liquids' },
 			{ type: 'checkbox', key: 'mapViewerEnableSkybox', label: 'Enable Skybox' },
 			{ type: 'color', key: 'mapViewerSkyColor', label: 'Sky Colour', hidden_key: 'mapViewerEnableSkybox' },
+			{ type: 'checkbox', key: 'mapViewerEnableLighting', label: 'Enable Lighting' },
 			{ type: 'checkbox', key: 'mapViewerFogEnabled', label: 'Enable Fog' },
 			{ type: 'slider', data_key: 'time_of_day', label: 'Time of Day', min: 0, max: 2880, step: 1 }
 		]
@@ -206,6 +207,11 @@ module.exports = {
 			this._wireframe_color = hex_to_rgb(val);
 		},
 
+
+		'config.mapViewerEnableLighting'(val) {
+			if (this._terrain)
+				this._terrain.lighting_enabled = val;
+		},
 
 		'config.mapViewerFogEnabled'(val) {
 			if (this._terrain)
@@ -447,6 +453,7 @@ module.exports = {
 					const scene_params = {
 						camera_pos: this._terrain.camera_pos,
 						light_uniforms: this._terrain.light_uniforms,
+						lighting_enabled: this._terrain.lighting_enabled,
 						fog_uniforms: this._terrain.fog_enabled ? this._terrain.fog_uniforms : null
 					};
 
@@ -626,6 +633,7 @@ module.exports = {
 				return;
 
 			this._terrain.fog_enabled = this.config.mapViewerFogEnabled;
+			this._terrain.lighting_enabled = this.config.mapViewerEnableLighting;
 		},
 
 		_update_fog(cam) {

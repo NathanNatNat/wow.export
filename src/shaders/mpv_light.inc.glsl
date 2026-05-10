@@ -3,8 +3,12 @@ uniform vec3 u_ambient_color;
 uniform vec3 u_horizon_ambient_color;
 uniform vec3 u_ground_ambient_color;
 uniform vec3 u_direct_color;
+uniform int u_lighting_enabled;
 
 vec3 calc_exterior_light(vec3 base_color, vec3 normal) {
+	if (u_lighting_enabled == 0)
+		return base_color;
+
 	float n_dot_up = normal.y;
 	float sky_w = max(n_dot_up, 0.0);
 	float ground_w = max(-n_dot_up, 0.0);

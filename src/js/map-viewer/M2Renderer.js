@@ -40,6 +40,8 @@ const DEFAULT_DIRECT = new Float32Array([0.5, 0.475, 0.425]);
 const DEFAULT_LIGHT_DIR = new Float32Array([-0.4394, 0.8192, 0.3687]);
 
 function set_scene_uniforms(shader, params) {
+	shader.set_uniform_1i('u_lighting_enabled', params?.lighting_enabled !== false ? 1 : 0);
+
 	const lu = params?.light_uniforms;
 	if (lu) {
 		shader.set_uniform_3fv('u_light_dir', lu.light_dir);

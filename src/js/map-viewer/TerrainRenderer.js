@@ -69,6 +69,7 @@ class TerrainRenderer {
 		this._last_cy = NaN;
 
 		this.light_uniforms = null;
+		this.lighting_enabled = true;
 
 		this.fog_enabled = false;
 		this.fog_uniforms = null;
@@ -1221,6 +1222,8 @@ class TerrainRenderer {
 	}
 
 	_set_light_uniforms(shader) {
+		shader.set_uniform_1i('u_lighting_enabled', this.lighting_enabled ? 1 : 0);
+
 		const lu = this.light_uniforms;
 		if (!lu)
 			return;
