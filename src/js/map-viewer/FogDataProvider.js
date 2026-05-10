@@ -22,6 +22,7 @@ class FogDataProvider {
 		this._last_pos = [NaN, NaN, NaN];
 		this._last_time = -1;
 		this._fog_uniforms = create_default_uniforms();
+		this._sky_colors = create_default_sky_colors();
 
 		// public state
 		this.time_of_day = 720; // noon (0-2880, half-minutes)
@@ -33,6 +34,10 @@ class FogDataProvider {
 
 	get fog_uniforms() {
 		return this._fog_uniforms;
+	}
+
+	get sky_colors() {
+		return this._sky_colors;
 	}
 
 	async load() {
@@ -182,11 +187,13 @@ class FogDataProvider {
 
 		if (blends.length === 0) {
 			this._fog_uniforms = create_default_uniforms();
+			this._sky_colors = create_default_sky_colors();
 			return;
 		}
 
-		// compute fog result for each blend, then combine
+		// compute fog + sky result for each blend, then combine
 		let result = null;
+		let sky_result = null;
 		for (const { light_param_id, blend } of blends) {
 			if (light_param_id <= 0)
 				continue;
@@ -197,17 +204,21 @@ class FogDataProvider {
 
 			if (!result) {
 				result = scale_fog_result(fog, blend);
+				sky_result = scale_sky_colors(fog.sky_colors, blend);
 			} else {
 				add_scaled_fog_result(result, fog, blend);
+				add_scaled_sky_colors(sky_result, fog.sky_colors, blend);
 			}
 		}
 
 		if (!result) {
 			this._fog_uniforms = create_default_uniforms();
+			this._sky_colors = create_default_sky_colors();
 			return;
 		}
 
 		this._fog_uniforms = fog_result_to_uniforms(result);
+		this._sky_colors = sky_result;
 	}
 
 	_calculate_light_blends(wow_x, wow_y, wow_z) {
@@ -376,7 +387,17 @@ function interpolate_light_data(a, b, t) {
 	if (sun_fog_angle >= 1.0)
 		sun_angle_blend = 0.0;
 
+	const sky_colors = [
+		lerp_color('SkyTopColor'),
+		lerp_color('SkyMiddleColor'),
+		lerp_color('SkyBand1Color'),
+		lerp_color('SkyBand2Color'),
+		lerp_color('SkySmogColor'),
+		lerp_color('SkyFogColor')
+	];
+
 	return {
+		sky_colors,
 		fog_start,
 		fog_end: Math.max(fog_end, 10),
 		fog_density,
@@ -444,6 +465,9 @@ function lerp_int_color(a, b, t) {
 function scale_fog_result(fog, scale) {
 	const result = {};
 	for (const key of Object.keys(fog)) {
+		if (key === 'sky_colors')
+			continue;
+
 		const val = fog[key];
 		if (Array.isArray(val))
 			result[key] = val.map(v => v * scale);
@@ -457,6 +481,9 @@ function scale_fog_result(fog, scale) {
 
 function add_scaled_fog_result(dest, src, scale) {
 	for (const key of Object.keys(src)) {
+		if (key === 'sky_colors')
+			continue;
+
 		const val = src[key];
 		if (Array.isArray(val)) {
 			for (let i = 0; i < val.length; i++)
@@ -489,6 +516,29 @@ function fog_result_to_uniforms(fog) {
 		]),
 		hend_color_offset: new Float32Array([fog.end_fog_height_color[0], fog.end_fog_height_color[1], fog.end_fog_height_color[2], fog.fog_start_offset])
 	};
+}
+
+function create_default_sky_colors() {
+	return [
+		[0.12, 0.12, 0.12],
+		[0.12, 0.12, 0.12],
+		[0.12, 0.12, 0.12],
+		[0.12, 0.12, 0.12],
+		[0.12, 0.12, 0.12],
+		[0.12, 0.12, 0.12]
+	];
+}
+
+function scale_sky_colors(colors, scale) {
+	return colors.map(c => [c[0] * scale, c[1] * scale, c[2] * scale]);
+}
+
+function add_scaled_sky_colors(dest, src, scale) {
+	for (let i = 0; i < 6; i++) {
+		dest[i][0] += src[i][0] * scale;
+		dest[i][1] += src[i][1] * scale;
+		dest[i][2] += src[i][2] * scale;
+	}
 }
 
 function create_default_uniforms() {

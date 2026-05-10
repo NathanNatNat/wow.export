@@ -23,7 +23,8 @@ const SHADER_MANIFEST = {
 	mpv_terrain_full_legacy: { vert: 'mpv_terrain_full.vertex.shader', frag: 'mpv_terrain_full_legacy.fragment.shader' },
 	mpv_m2: { vert: 'mpv_m2.vertex.shader', frag: 'mpv_m2.fragment.shader' },
 	mpv_liquid: { vert: 'mpv_liquid.vertex.shader', frag: 'mpv_liquid.fragment.shader' },
-	mpv_wmo: { vert: 'mpv_wmo.vertex.shader', frag: 'mpv_wmo.fragment.shader' }
+	mpv_wmo: { vert: 'mpv_wmo.vertex.shader', frag: 'mpv_wmo.fragment.shader' },
+	mpv_sky: { vert: 'mpv_sky.vertex.shader', frag: 'mpv_sky.fragment.shader' }
 };
 
 // cached shader source text

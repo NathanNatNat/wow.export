@@ -9,6 +9,7 @@ const M2Renderer = require('./M2Renderer');
 const WMORenderer = require('./WMORenderer');
 const LiquidRenderer = require('./LiquidRenderer');
 const FogDataProvider = require('./FogDataProvider');
+const SkyRenderer = require('./SkyRenderer');
 const Minimap = require('./Minimap');
 
 const TILE_SIZE = constants.GAME.TILE_SIZE;
@@ -35,7 +36,8 @@ const SECTIONS = [
 			{ type: 'checkbox', key: 'mapViewerShowWMOModels', label: 'Show WMO Models' },
 			{ type: 'slider', key: 'mapViewerWMORenderDistance', label: 'WMO Render Distance', min: 50, max: 64000, step: 50 },
 			{ type: 'checkbox', key: 'mapViewerShowLiquids', label: 'Show Liquids' },
-			{ type: 'color', key: 'mapViewerSkyColor', label: 'Sky Colour' },
+			{ type: 'checkbox', key: 'mapViewerEnableSkybox', label: 'Enable Skybox' },
+			{ type: 'color', key: 'mapViewerSkyColor', label: 'Sky Colour', hidden_key: 'mapViewerEnableSkybox' },
 			{ type: 'checkbox', key: 'mapViewerFogEnabled', label: 'Enable Fog' },
 			{ type: 'slider', data_key: 'time_of_day', label: 'Time of Day', min: 0, max: 2880, step: 1 }
 		]
@@ -192,10 +194,21 @@ module.exports = {
 		},
 
 		'config.mapViewerSkyColor'(val) {
-			if (this._gl_ctx) {
+			if (this._gl_ctx && !this.config.mapViewerEnableSkybox) {
 				const c = hex_to_rgb(val);
 				this._gl_ctx.set_clear_color(c[0], c[1], c[2], 1);
 			}
+		},
+
+		'config.mapViewerEnableSkybox'(val) {
+			if (!val && this._gl_ctx) {
+				const c = hex_to_rgb(this.config.mapViewerSkyColor);
+				this._gl_ctx.set_clear_color(c[0], c[1], c[2], 1);
+			}
+
+			// ensure fog provider is loaded for sky color data
+			if (val && this._fog_provider && !this._fog_provider.loaded)
+				this._fog_provider.load();
 		},
 
 		'config.mapViewerTerrainColor'(val) {
@@ -231,8 +244,8 @@ module.exports = {
 			if (val && this._fog_provider && !this._fog_provider.loaded)
 				this._fog_provider.load();
 
-			// restore sky color when fog disabled
-			if (!val && this._gl_ctx) {
+			// restore sky color when fog disabled (only if skybox is also disabled)
+			if (!val && this._gl_ctx && !this.config.mapViewerEnableSkybox) {
 				const c = hex_to_rgb(this.config.mapViewerSkyColor);
 				this._gl_ctx.set_clear_color(c[0], c[1], c[2], 1);
 			}
@@ -331,6 +344,9 @@ module.exports = {
 		},
 
 		is_ctrl_visible(ctrl) {
+			if (ctrl.hidden_key && this.config[ctrl.hidden_key])
+				return false;
+
 			if (!ctrl.visible_mode)
 				return true;
 
@@ -423,8 +439,12 @@ module.exports = {
 					const ground = terrain_h !== null ? terrain_h : 0;
 					this._height_above_terrain = cam[1] - ground;
 
-					// update fog before rendering
+					// update fog/sky data before rendering
 					this._update_fog(cam);
+
+					// render sky dome before terrain (depth off, draws behind everything)
+					if (this._sky_renderer && this.config.mapViewerEnableSkybox)
+						this._update_and_render_sky();
 
 					let visible;
 					if (this.texture_mode === 'Wireframe') {
@@ -591,9 +611,12 @@ module.exports = {
 				this._liquid_renderer = liquid;
 				this._terrain = terrain;
 
-				// fog data provider (lazy-loaded when fog is enabled)
+				// sky renderer
+				this._sky_renderer = new SkyRenderer(this._gl_ctx);
+
+				// fog/sky data provider (shared DB2 tables)
 				this._fog_provider = new FogDataProvider(map_id);
-				if (core.view.config.mapViewerFogEnabled)
+				if (core.view.config.mapViewerFogEnabled || core.view.config.mapViewerEnableSkybox)
 					this._fog_provider.load();
 
 				this._apply_sun_settings();
@@ -622,7 +645,10 @@ module.exports = {
 		},
 
 		_update_fog(cam) {
-			if (!this._fog_provider || !this._terrain.fog_enabled)
+			const needs_fog = this._terrain.fog_enabled;
+			const needs_sky = this.config.mapViewerEnableSkybox;
+
+			if (!this._fog_provider || (!needs_fog && !needs_sky))
 				return;
 
 			if (!this._fog_provider.loaded)
@@ -631,21 +657,37 @@ module.exports = {
 			this._fog_provider.time_of_day = this.time_of_day;
 			this._fog_provider.update(cam);
 
-			const uniforms = this._fog_provider.fog_uniforms;
+			if (needs_fog) {
+				const uniforms = this._fog_provider.fog_uniforms;
 
-			// inject sun direction into fog uniforms
-			const light_dir = this._terrain.light_dir;
-			uniforms.sun_dir_z_scalar[0] = light_dir[0];
-			uniforms.sun_dir_z_scalar[1] = light_dir[1];
-			uniforms.sun_dir_z_scalar[2] = light_dir[2];
+				// inject sun direction into fog uniforms
+				const light_dir = this._terrain.light_dir;
+				uniforms.sun_dir_z_scalar[0] = light_dir[0];
+				uniforms.sun_dir_z_scalar[1] = light_dir[1];
+				uniforms.sun_dir_z_scalar[2] = light_dir[2];
 
-			this._terrain.fog_uniforms = uniforms;
+				this._terrain.fog_uniforms = uniforms;
 
-			// update sky color to match fog color when fog is enabled
-			if (uniforms.enabled > 0.5) {
-				const fog_color = uniforms.color_height_rate;
-				this._gl_ctx.set_clear_color(fog_color[0], fog_color[1], fog_color[2], 1);
+				// update clear color to match fog when fog is enabled (skybox handles its own colors)
+				if (!needs_sky && uniforms.enabled > 0.5) {
+					const fog_color = uniforms.color_height_rate;
+					this._gl_ctx.set_clear_color(fog_color[0], fog_color[1], fog_color[2], 1);
+				}
 			}
+		},
+
+		_update_and_render_sky() {
+			if (!this._fog_provider || !this._fog_provider.loaded)
+				return;
+
+			const sky_colors = this._fog_provider.sky_colors;
+			this._sky_renderer.set_sky_colors(sky_colors);
+
+			// set clear color to fog/horizon color so gaps blend naturally
+			const horizon = sky_colors[5];
+			this._gl_ctx.set_clear_color(horizon[0], horizon[1], horizon[2], 1);
+
+			this._sky_renderer.render(this._camera.view_matrix, this._camera.projection_matrix);
 		},
 
 		_position_camera() {
@@ -779,6 +821,11 @@ module.exports = {
 			if (this._controls) {
 				this._controls.dispose();
 				this._controls = null;
+			}
+
+			if (this._sky_renderer) {
+				this._sky_renderer.dispose();
+				this._sky_renderer = null;
 			}
 
 			if (this._liquid_renderer) {
