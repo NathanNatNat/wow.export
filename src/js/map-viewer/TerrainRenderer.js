@@ -73,6 +73,7 @@ class TerrainRenderer {
 
 		this.fog_enabled = false;
 		this.fog_uniforms = null;
+		this.liquid_colors = null;
 		this.camera_pos = new Float32Array([0, 0, 0]);
 
 		this._vao_pool = [];

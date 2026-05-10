@@ -467,7 +467,8 @@ module.exports = {
 						camera_pos: this._terrain.camera_pos,
 						light_uniforms: this._terrain.light_uniforms,
 						lighting_enabled: this._terrain.lighting_enabled,
-						fog_uniforms: this._terrain.fog_enabled ? this._terrain.fog_uniforms : null
+						fog_uniforms: this._terrain.fog_enabled ? this._terrain.fog_uniforms : null,
+						liquid_colors: this._terrain.liquid_colors
 					};
 
 					// liquids
@@ -661,8 +662,9 @@ module.exports = {
 			this._fog_provider.time_of_day = this.time_of_day;
 			this._fog_provider.update(cam);
 
-			// always apply DB2-driven lighting
+			// always apply DB2-driven lighting + liquid colors
 			this._terrain.light_uniforms = this._fog_provider.light_uniforms;
+			this._terrain.liquid_colors = this._fog_provider.liquid_colors;
 
 			// inject sun direction from lighting into fog uniforms
 			const light_dir = this._fog_provider.light_uniforms.light_dir;

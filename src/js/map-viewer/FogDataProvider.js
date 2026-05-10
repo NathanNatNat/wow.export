@@ -24,6 +24,7 @@ class FogDataProvider {
 		this._fog_uniforms = create_default_uniforms();
 		this._sky_colors = create_default_sky_colors();
 		this._light_uniforms = create_default_light_uniforms();
+		this._liquid_colors = create_default_liquid_colors();
 
 		// public state
 		this.time_of_day = 720; // noon (0-2880, half-minutes)
@@ -43,6 +44,10 @@ class FogDataProvider {
 
 	get light_uniforms() {
 		return this._light_uniforms;
+	}
+
+	get liquid_colors() {
+		return this._liquid_colors;
 	}
 
 	async load() {
@@ -194,13 +199,15 @@ class FogDataProvider {
 			this._fog_uniforms = create_default_uniforms();
 			this._sky_colors = create_default_sky_colors();
 			this._light_uniforms = create_default_light_uniforms();
+			this._liquid_colors = create_default_liquid_colors();
 			return;
 		}
 
-		// compute fog + sky + lighting result for each blend, then combine
+		// compute fog + sky + lighting + liquid result for each blend, then combine
 		let result = null;
 		let sky_result = null;
 		let light_result = null;
+		let liquid_result = null;
 		for (const { light_param_id, blend } of blends) {
 			if (light_param_id <= 0)
 				continue;
@@ -213,10 +220,12 @@ class FogDataProvider {
 				result = scale_fog_result(fog, blend);
 				sky_result = scale_sky_colors(fog.sky_colors, blend);
 				light_result = scale_light_colors(fog.light_colors, blend);
+				liquid_result = scale_liquid_colors(fog.liquid_colors, blend);
 			} else {
 				add_scaled_fog_result(result, fog, blend);
 				add_scaled_sky_colors(sky_result, fog.sky_colors, blend);
 				add_scaled_light_colors(light_result, fog.light_colors, blend);
+				add_scaled_liquid_colors(liquid_result, fog.liquid_colors, blend);
 			}
 		}
 
@@ -224,12 +233,14 @@ class FogDataProvider {
 			this._fog_uniforms = create_default_uniforms();
 			this._sky_colors = create_default_sky_colors();
 			this._light_uniforms = create_default_light_uniforms();
+			this._liquid_colors = create_default_liquid_colors();
 			return;
 		}
 
 		this._fog_uniforms = fog_result_to_uniforms(result);
 		this._sky_colors = sky_result;
 		this._light_uniforms = light_colors_to_uniforms(light_result, time);
+		this._liquid_colors = liquid_colors_to_uniforms(liquid_result);
 	}
 
 	_calculate_light_blends(wow_x, wow_y, wow_z) {
@@ -328,7 +339,18 @@ class FogDataProvider {
 				blend_t = Math.min(Math.max((time - time_a) / (2880 - time_a + time_b), 0), 1);
 		}
 
-		return interpolate_light_data(row_a, row_b, blend_t);
+		const result = interpolate_light_data(row_a, row_b, blend_t);
+
+		// liquid alpha values are on LightParams, not time-interpolated
+		const lp_row = this._light_params_table?.rows?.get(light_param_id);
+		if (lp_row) {
+			result.liquid_colors.river_shallow_alpha = lp_row.WaterShallowAlpha ?? 0.7;
+			result.liquid_colors.river_deep_alpha = lp_row.WaterDeepAlpha ?? 0.7;
+			result.liquid_colors.ocean_shallow_alpha = lp_row.OceanShallowAlpha ?? 0.7;
+			result.liquid_colors.ocean_deep_alpha = lp_row.OceanDeepAlpha ?? 0.7;
+		}
+
+		return result;
 	}
 }
 
@@ -414,9 +436,19 @@ function interpolate_light_data(a, b, t) {
 		direct: lerp_color('DirectColor')
 	};
 
+	const liquid_colors = {
+		close_river_color: lerp_color('CloseRiverColor'),
+		close_ocean_color: lerp_color('CloseOceanColor'),
+		river_shallow_alpha: 0.7,
+		river_deep_alpha: 0.7,
+		ocean_shallow_alpha: 0.7,
+		ocean_deep_alpha: 0.7
+	};
+
 	return {
 		sky_colors,
 		light_colors,
+		liquid_colors,
 		fog_start,
 		fog_end: Math.max(fog_end, 10),
 		fog_density,
@@ -481,7 +513,7 @@ function lerp_int_color(a, b, t) {
 	];
 }
 
-const FOG_RESULT_SKIP_KEYS = new Set(['sky_colors', 'light_colors']);
+const FOG_RESULT_SKIP_KEYS = new Set(['sky_colors', 'light_colors', 'liquid_colors']);
 
 function scale_fog_result(fog, scale) {
 	const result = {};
@@ -642,6 +674,50 @@ function add_scaled_light_colors(dest, src, scale) {
 		for (let i = 0; i < 3; i++)
 			dest[key][i] += src[key][i] * scale;
 	}
+}
+
+function scale_liquid_colors(colors, scale) {
+	return {
+		close_river_color: colors.close_river_color.map(v => v * scale),
+		close_ocean_color: colors.close_ocean_color.map(v => v * scale),
+		river_shallow_alpha: colors.river_shallow_alpha * scale,
+		river_deep_alpha: colors.river_deep_alpha * scale,
+		ocean_shallow_alpha: colors.ocean_shallow_alpha * scale,
+		ocean_deep_alpha: colors.ocean_deep_alpha * scale
+	};
+}
+
+function add_scaled_liquid_colors(dest, src, scale) {
+	for (const key of ['close_river_color', 'close_ocean_color']) {
+		for (let i = 0; i < 3; i++)
+			dest[key][i] += src[key][i] * scale;
+	}
+	dest.river_shallow_alpha += src.river_shallow_alpha * scale;
+	dest.river_deep_alpha += src.river_deep_alpha * scale;
+	dest.ocean_shallow_alpha += src.ocean_shallow_alpha * scale;
+	dest.ocean_deep_alpha += src.ocean_deep_alpha * scale;
+}
+
+function liquid_colors_to_uniforms(colors) {
+	return {
+		close_river_color: new Float32Array(colors.close_river_color),
+		close_ocean_color: new Float32Array(colors.close_ocean_color),
+		river_shallow_alpha: colors.river_shallow_alpha,
+		river_deep_alpha: colors.river_deep_alpha,
+		ocean_shallow_alpha: colors.ocean_shallow_alpha,
+		ocean_deep_alpha: colors.ocean_deep_alpha
+	};
+}
+
+function create_default_liquid_colors() {
+	return {
+		close_river_color: new Float32Array([0.0, 0.2, 0.5]),
+		close_ocean_color: new Float32Array([0.0, 0.1, 0.4]),
+		river_shallow_alpha: 0.7,
+		river_deep_alpha: 0.7,
+		ocean_shallow_alpha: 0.7,
+		ocean_deep_alpha: 0.7
+	};
 }
 
 function compute_sun_dir_from_time(time) {

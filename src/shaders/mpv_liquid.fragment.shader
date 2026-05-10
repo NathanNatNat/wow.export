@@ -15,14 +15,21 @@ uniform float u_time;
 
 uniform vec3 u_camera_pos;
 
+// scene-driven liquid colors from LightData/LightParams
+uniform vec3 u_close_river_color;
+uniform vec3 u_close_ocean_color;
+uniform float u_river_shallow_alpha;
+uniform float u_river_deep_alpha;
+uniform float u_ocean_shallow_alpha;
+uniform float u_ocean_deep_alpha;
+
 out vec4 frag_color;
 
 #include "mpv_light.inc.glsl"
 #include "mpv_fog.inc.glsl"
 
 const float PI = 3.14159265359;
-const float LIQUID_ALPHA_SHALLOW = 0.4;
-const float LIQUID_ALPHA_DEEP = 0.8;
+const int LIQUID_FLAG_OCEAN = 1024;
 
 vec2 rotate_z(vec2 v, float angle) {
 	float s = sin(angle);
@@ -40,7 +47,24 @@ vec2 get_scroll_offset(float time, vec2 speed) {
 }
 
 void main() {
-	vec3 base_color = u_liquid_color;
+	// select base color and alpha from scene light data based on liquid flags
+	vec3 base_color;
+	float shallow_alpha;
+	float deep_alpha;
+
+	if ((u_liquid_flags & LIQUID_FLAG_OCEAN) != 0) {
+		base_color = u_close_ocean_color;
+		shallow_alpha = u_ocean_shallow_alpha;
+		deep_alpha = u_ocean_deep_alpha;
+	} else if (u_liquid_flags == 15) {
+		base_color = u_close_river_color;
+		shallow_alpha = u_river_shallow_alpha;
+		deep_alpha = u_river_deep_alpha;
+	} else {
+		base_color = u_liquid_color;
+		shallow_alpha = 0.7;
+		deep_alpha = 0.7;
+	}
 
 	vec2 uv = v_texcoord;
 	if (u_material_id == 1 || u_material_id == 3) {
@@ -55,11 +79,12 @@ void main() {
 
 	vec3 n = vec3(0.0, 1.0, 0.0);
 
+	// magma is not affected by light
 	if (u_material_id != 2 && u_material_id != 4)
 		diffuse = calc_exterior_light(diffuse, n);
 
 	diffuse = apply_fog(diffuse, v_position, u_camera_pos);
 
-	float alpha = mix(LIQUID_ALPHA_SHALLOW, LIQUID_ALPHA_DEEP, v_depth);
+	float alpha = mix(shallow_alpha, deep_alpha, v_depth);
 	frag_color = vec4(diffuse, alpha);
 }

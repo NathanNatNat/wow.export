@@ -52,6 +52,16 @@ function set_scene_uniforms(shader, params) {
 		shader.set_uniform_3fv('u_direct_color', DEFAULT_DIRECT);
 	}
 
+	const lc = params?.liquid_colors;
+	if (lc) {
+		shader.set_uniform_3fv('u_close_river_color', lc.close_river_color);
+		shader.set_uniform_3fv('u_close_ocean_color', lc.close_ocean_color);
+		shader.set_uniform_1f('u_river_shallow_alpha', lc.river_shallow_alpha);
+		shader.set_uniform_1f('u_river_deep_alpha', lc.river_deep_alpha);
+		shader.set_uniform_1f('u_ocean_shallow_alpha', lc.ocean_shallow_alpha);
+		shader.set_uniform_1f('u_ocean_deep_alpha', lc.ocean_deep_alpha);
+	}
+
 	const fog = params?.fog_uniforms;
 	shader.set_uniform_3fv('u_camera_pos', params?.camera_pos ?? DEFAULT_CAMERA_POS);
 	if (fog) {
