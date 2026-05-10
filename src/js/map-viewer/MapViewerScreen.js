@@ -34,6 +34,7 @@ const SECTIONS = [
 			{ type: 'slider', key: 'mapViewerRenderDistance', label: 'Render Distance', min: 1, max: 256, step: 1 },
 			{ type: 'checkbox', key: 'mapViewerShowM2Models', label: 'Show M2 Models' },
 			{ type: 'slider', key: 'mapViewerM2RenderDistance', label: 'M2 Render Distance', min: 50, max: 64000, step: 50 },
+			{ type: 'checkbox', key: 'mapViewerShowGlobalWMO', label: 'Show Global WMO', visible_data_key: 'has_global_wmo' },
 			{ type: 'checkbox', key: 'mapViewerShowWMOModels', label: 'Show WMO Models' },
 			{ type: 'slider', key: 'mapViewerWMORenderDistance', label: 'WMO Render Distance', min: 50, max: 64000, step: 50 },
 			{ type: 'checkbox', key: 'mapViewerShowLiquids', label: 'Show Liquids' },
@@ -178,7 +179,8 @@ module.exports = {
 			render_holes: true,
 			show_adt_bounds: false,
 			show_chunk_bounds: false,
-			time_of_day: 1440
+			time_of_day: 1440,
+			has_global_wmo: false
 		};
 	},
 
@@ -260,6 +262,11 @@ module.exports = {
 		'config.mapViewerM2RenderDistance'(val) {
 			if (this._m2_renderer)
 				this._m2_renderer.set_render_distance(val);
+		},
+
+		'config.mapViewerShowGlobalWMO'(val) {
+			if (this._wmo_renderer)
+				this._wmo_renderer.set_global_enabled(val);
 		},
 
 		'config.mapViewerShowWMOModels'(val) {
@@ -346,6 +353,9 @@ module.exports = {
 
 		is_ctrl_visible(ctrl) {
 			if (ctrl.hidden_key && this.config[ctrl.hidden_key])
+				return false;
+
+			if (ctrl.visible_data_key && !this[ctrl.visible_data_key])
 				return false;
 
 			if (!ctrl.visible_mode)
@@ -604,6 +614,23 @@ module.exports = {
 					wmo.on_tile_unloaded(key);
 					liquid.on_tile_unloaded(key);
 				};
+
+				// load global WMO if present
+				const global_wmo = core.view.mapViewerGlobalWMO;
+				if (global_wmo) {
+					this.has_global_wmo = true;
+
+					wmo.load_global_wmo(global_wmo.file_data_id, global_wmo.placement);
+					wmo.set_global_enabled(core.view.config.mapViewerShowGlobalWMO);
+
+					// position camera from WMO placement instead of terrain center
+					const pos = global_wmo.placement.position;
+					terrain.map_center = [
+						constants.GAME.MAP_COORD_BASE - pos[0],
+						pos[1],
+						constants.GAME.MAP_COORD_BASE - pos[2]
+					];
+				}
 
 				this._m2_renderer = m2;
 				this._wmo_renderer = wmo;

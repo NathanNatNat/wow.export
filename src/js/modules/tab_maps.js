@@ -307,7 +307,7 @@ module.exports = {
 			<div class="spaced-preview-controls">
 				<input v-if="$core.view.mapViewerHasWorldModel" type="button" value="Export Global WMO" @click="export_map_wmo" :class="{ disabled: $core.view.isBusy }"/>
 				<input v-if="$core.view.mapViewerHasWorldModel" type="button" value="Export WMO Minimap" @click="export_map_wmo_minimap" :class="{ disabled: $core.view.isBusy }"/>
-				<input v-if="!$core.view.mapViewerIsWMOMinimap" type="button" value="Open in Map Viewer (3D)" @click="view_map" :disabled="$core.view.isBusy || !$core.view.mapViewerSelectedDir"/>
+				<input type="button" value="Open in Map Viewer (3D)" @click="view_map" :disabled="$core.view.isBusy || !$core.view.mapViewerSelectedDir"/>
 				<component v-if="!$core.view.mapViewerIsWMOMinimap" :is="$components.MenuButton" :options="$core.view.menuButtonMapExport" :default="$core.view.config.exportMapFormat" @change="$core.view.config.exportMapFormat = $event" :disabled="$core.view.isBusy || $core.view.mapViewerSelection.length === 0" @click="export_map"></component>
 			</div>
 
@@ -434,6 +434,7 @@ module.exports = {
 			current_wmo_minimap = null;
 			this.$core.view.mapViewerHasWorldModel = false;
 			this.$core.view.mapViewerIsWMOMinimap = false;
+			this.$core.view.mapViewerGlobalWMO = null;
 			this.$core.view.mapViewerGridSize = null;
 			this.$core.view.mapViewerSelection.splice(0);
 
@@ -452,6 +453,17 @@ module.exports = {
 				const has_global_wmo = wdt.worldModelPlacement !== undefined;
 
 				if (!has_terrain && has_global_wmo) {
+					// resolve global WMO file data ID for map viewer
+					const placement = wdt.worldModelPlacement;
+					let gwmo_id = 0;
+					if (wdt.worldModel)
+						gwmo_id = listfile.getByFilename(wdt.worldModel);
+					if (!gwmo_id)
+						gwmo_id = placement.id;
+
+					if (gwmo_id)
+						this.$core.view.mapViewerGlobalWMO = { file_data_id: gwmo_id, placement };
+
 					// try to load WMO minimap
 					await this.setup_wmo_minimap(wdt);
 

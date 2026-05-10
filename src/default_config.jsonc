@@ -140,5 +140,6 @@
 	"mapViewerAllowModelSelection": true,
 	"mapViewerShowLiquids": true,
 	"mapViewerShowWMOModels": true,
-	"mapViewerWMORenderDistance": 5000
+	"mapViewerWMORenderDistance": 5000,
+	"mapViewerShowGlobalWMO": true
 }

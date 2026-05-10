@@ -98,7 +98,7 @@ const WDTChunkHandlers = {
 			flags: data.readUInt16LE(),
 			doodadSetIndex: data.readUInt16LE(),
 			nameSet: data.readUInt16LE(),
-			padding: data.readUInt16LE()
+			scale: data.readUInt16LE()
 		};
 	}
 };

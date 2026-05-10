@@ -219,6 +219,7 @@ const makeNewView = () => {
 		selectedZoneExpansionFilter: -1, // Currently selected zone expansion filter (-1 = show all)
 		mapViewerHasWorldModel: false, // Does selected map have a world model?
 		mapViewerIsWMOMinimap: false, // Is the map viewer showing a WMO minimap?
+		mapViewerGlobalWMO: null, // Global WMO data { file_data_id, placement }.
 		mapViewerTileLoader: null, // Tile loader for active map viewer map.
 		mapViewerSelectedMap: null, // Currently selected map.
 		mapViewerSelectedDir: null,

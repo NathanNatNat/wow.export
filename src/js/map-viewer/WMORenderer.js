@@ -302,6 +302,9 @@ class WMORenderer {
 		this.enabled = true;
 		this.render_distance = 5000;
 
+		this._global_file_data_id = 0;
+		this._global_enabled = false;
+
 		this._last_cam = new Float32Array(3);
 		this._culled_dirty = false;
 		this._disposed = false;
@@ -385,6 +388,54 @@ class WMORenderer {
 		this._tile_data.delete(key);
 	}
 
+	load_global_wmo(file_data_id, placement) {
+		if (!file_data_id || file_data_id <= 0)
+			return;
+
+		const scale = placement.scale || 1024;
+		const matrix = compute_wmo_model_matrix(placement.position, placement.rotation, scale);
+		const world_pos = new Float32Array([
+			MAP_COORD_BASE - placement.position[0],
+			placement.position[1],
+			MAP_COORD_BASE - placement.position[2]
+		]);
+
+		this._global_file_data_id = file_data_id;
+
+		let entry = this._model_cache.get(file_data_id);
+		if (!entry) {
+			entry = {
+				groups: null,
+				bounding_box: null,
+				texture_ids: null,
+				ref_count: 0,
+				tile_placements: new Map(),
+				culled_instances: [],
+				culled_count: 0,
+				queued: false
+			};
+			this._model_cache.set(file_data_id, entry);
+		}
+
+		entry.ref_count++;
+		entry.tile_placements.set('__global__', [{ file_data_id, matrix, world_pos, is_global: true }]);
+
+		if (!entry.groups && !entry.queued && !this._wmo_loading.has(file_data_id)) {
+			entry.queued = true;
+			this._wmo_load_queue.push(file_data_id);
+		}
+
+		this._culled_dirty = true;
+	}
+
+	set_global_enabled(val) {
+		if (this._global_enabled === val)
+			return;
+
+		this._global_enabled = val;
+		this._culled_dirty = true;
+	}
+
 	update(camera_pos) {
 		if (this._disposed)
 			return;
@@ -393,6 +444,8 @@ class WMORenderer {
 
 		if (this.enabled) {
 			this._pump_obj0_queue();
+			this._pump_wmo_queue();
+		} else if (this._global_enabled) {
 			this._pump_wmo_queue();
 		}
 
@@ -413,7 +466,7 @@ class WMORenderer {
 	}
 
 	render(view, proj, scene_params) {
-		if (!this.enabled)
+		if (!this.enabled && !this._global_enabled)
 			return 0;
 
 		const gl = this.gl;
@@ -494,6 +547,7 @@ class WMORenderer {
 			return;
 
 		this.enabled = val;
+		this._culled_dirty = true;
 
 		if (val) {
 			for (const [key, data] of this._tile_data) {
@@ -832,6 +886,17 @@ class WMORenderer {
 
 			for (const instances of entry.tile_placements.values()) {
 				for (const inst of instances) {
+					// global WMO: always visible, gated by _global_enabled
+					if (inst.is_global) {
+						if (this._global_enabled)
+							culled.push(inst);
+
+						continue;
+					}
+
+					if (!this.enabled)
+						continue;
+
 					const dx = inst.world_pos[0] - camera_pos[0];
 					const dy = inst.world_pos[1] - camera_pos[1];
 					const dz = inst.world_pos[2] - camera_pos[2];
@@ -852,6 +917,9 @@ class WMORenderer {
 
 		for (const instances of entry.tile_placements.values()) {
 			for (const inst of instances) {
+				if (inst.is_global)
+					return true;
+
 				const dx = inst.world_pos[0] - cam[0];
 				const dy = inst.world_pos[1] - cam[1];
 				const dz = inst.world_pos[2] - cam[2];
@@ -929,12 +997,20 @@ class WMORenderer {
 
 			for (const instances of entry.tile_placements.values()) {
 				for (const inst of instances) {
-					const dx = inst.world_pos[0] - this._last_cam[0];
-					const dy = inst.world_pos[1] - this._last_cam[1];
-					const dz = inst.world_pos[2] - this._last_cam[2];
+					if (inst.is_global) {
+						if (!this._global_enabled)
+							continue;
+					} else {
+						if (!this.enabled)
+							continue;
 
-					if (dx * dx + dy * dy + dz * dz > rd_sq)
-						continue;
+						const dx = inst.world_pos[0] - this._last_cam[0];
+						const dy = inst.world_pos[1] - this._last_cam[1];
+						const dz = inst.world_pos[2] - this._last_cam[2];
+
+						if (dx * dx + dy * dy + dz * dz > rd_sq)
+							continue;
+					}
 
 					const t = this._ray_aabb_test(ray_origin, ray_dir, bb, inst.matrix);
 					if (t >= 0 && t < best_t) {
