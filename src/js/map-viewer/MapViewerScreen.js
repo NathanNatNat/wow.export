@@ -266,6 +266,13 @@ module.exports = {
 			}
 		},
 
+		show_ui(val) {
+			if (val)
+				this.$nextTick(() => this._init_minimap());
+			else
+				this._dispose_minimap();
+		},
+
 		'config.mapViewerShowMinimap'(val) {
 			if (val)
 				this._init_minimap();
