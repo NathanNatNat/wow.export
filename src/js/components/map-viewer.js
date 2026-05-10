@@ -633,9 +633,6 @@ module.exports = {
 			const ctx = this.context;
 			const grid_size = this.effectiveGridSize;
 
-			console.log('[map-viewer] renderFullRedraw grid_size=%d tileSize=%d offset=(%d,%d)', grid_size, tileSize, state.offsetX, state.offsetY);
-			console.log('[map-viewer] mask length=%d', this.mask?.length);
-
 			// Clear the entire canvas and rendered set
 			ctx.clearRect(0, 0, canvas.width, canvas.height);
 			state.rendered.clear();
@@ -645,8 +642,6 @@ module.exports = {
 			const startY = Math.max(0, Math.floor(-state.offsetY / tileSize));
 			const endX = Math.min(grid_size, startX + Math.ceil(canvas.width / tileSize) + 1);
 			const endY = Math.min(grid_size, startY + Math.ceil(canvas.height / tileSize) + 1);
-
-			console.log('[map-viewer] tile range x=[%d,%d) y=[%d,%d)', startX, endX, startY, endY);
 
 			const viewport = this.$el;
 			const bufferX = (canvas.width - viewport.clientWidth) / 2;
@@ -674,7 +669,6 @@ module.exports = {
 					queued++;
 				}
 			}
-			console.log('[map-viewer] queued %d tiles', queued);
 		},
 
 		/**
