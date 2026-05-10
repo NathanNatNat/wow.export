@@ -113,11 +113,84 @@ function compute_wmo_model_matrix(position, rotation, scale) {
 	return mat;
 }
 
+const MOGP_EXTERIOR = 0x8;
+const MOGP_EXTERIOR_LIT = 0x40;
+const MOHD_SKIP_BASE_COLOR = 0x02;
+const MOHD_LIGHTEN_INTERIORS = 0x08;
+
+/**
+ * preprocess MOCV vertex colors to match the WoW client pipeline.
+ * subtracts WMO header ambient, applies alpha-weighted scaling, divides by 2.
+ * sets alpha channel for interior/exterior blending.
+ * colors is a Uint8Array in BGRA layout, modified in-place.
+ */
+function fix_color_vertex_alpha(colors, amb_color, wmo_flags, group_flags, trans_batch_count, batches) {
+	if (!colors)
+		return;
+
+	const vert_count = colors.length / 4;
+
+	let begin_second = 0;
+	if (trans_batch_count > 0 && batches && batches.length >= trans_batch_count)
+		begin_second = batches[trans_batch_count - 1].lastVertex + 1;
+
+	const uses_exterior = !!(group_flags & (MOGP_EXTERIOR | MOGP_EXTERIOR_LIT));
+
+	if (wmo_flags & MOHD_LIGHTEN_INTERIORS) {
+		for (let i = begin_second; i < vert_count; i++)
+			colors[i * 4 + 3] = uses_exterior ? 0xFF : 0x00;
+
+		return;
+	}
+
+	let amb_r, amb_g, amb_b;
+	if (wmo_flags & MOHD_SKIP_BASE_COLOR) {
+		amb_r = 0;
+		amb_g = 0;
+		amb_b = 0;
+	} else {
+		amb_b = amb_color & 0xFF;
+		amb_g = (amb_color >> 8) & 0xFF;
+		amb_r = (amb_color >> 16) & 0xFF;
+	}
+
+	// transparent batch vertices [0, begin_second)
+	for (let i = 0; i < begin_second; i++) {
+		const c = i * 4;
+
+		// subtract ambient in-place (uint8 wrapping matches reference)
+		colors[c] -= amb_b;
+		colors[c + 1] -= amb_g;
+		colors[c + 2] -= amb_r;
+
+		// read modified values + alpha
+		const alpha = colors[c + 3] / 255.0;
+		const r = colors[c + 2], g = colors[c + 1], b = colors[c];
+
+		// (channel * (1 - alpha)) / 2
+		colors[c + 2] = Math.max(0, Math.floor((r - alpha * r) / 2));
+		colors[c + 1] = Math.max(0, Math.floor((g - alpha * g) / 2));
+		colors[c] = Math.max(0, Math.floor((b - alpha * b) / 2));
+	}
+
+	// remaining batch vertices [begin_second, end)
+	for (let i = begin_second; i < vert_count; i++) {
+		const c = i * 4;
+		const r = colors[c + 2], g = colors[c + 1], b = colors[c], a = colors[c + 3];
+
+		// (channel * alpha / 64 + channel - ambChannel) / 2
+		colors[c + 2] = Math.min(255, Math.max(0, Math.floor(((r * a) / 64 + r - amb_r) / 2)));
+		colors[c + 1] = Math.min(255, Math.max(0, Math.floor(((g * a) / 64 + g - amb_g) / 2)));
+		colors[c] = Math.min(255, Math.max(0, Math.floor(((b * a) / 64 + b - amb_b) / 2)));
+		colors[c + 3] = uses_exterior ? 0xFF : 0x00;
+	}
+}
+
 /**
  * build interleaved vertex data from a WMO group.
  * format: pos(3f) + normal(3f) + uv1(2f) + uv2(2f) + uv3(2f) + color1(4ub) + color2(4ub) = 56 bytes
  */
-function build_group_geometry(group) {
+function build_group_geometry(group, amb_color, wmo_flags) {
 	if (!group.vertices || !group.normals || !group.indices)
 		return null;
 
@@ -133,6 +206,8 @@ function build_group_geometry(group) {
 	const uvs3 = group.uvs?.[2];
 	const colors1 = group.vertexColours?.[0];
 	const colors2 = group.vertexColours?.[1];
+
+	fix_color_vertex_alpha(colors1, amb_color, wmo_flags, group.flags ?? 0, group.numBatchesA ?? 0, group.renderBatches);
 
 	for (let i = 0; i < vert_count; i++) {
 		const offset = i * WMO_VERTEX_STRIDE;
@@ -913,7 +988,7 @@ class WMORenderer {
 
 				try {
 					const group = await wmo.getGroup(i);
-					const geo = build_group_geometry(group);
+					const geo = build_group_geometry(group, wmo.ambientColor ?? 0, wmo.flags ?? 0);
 					if (!geo)
 						continue;
 
