@@ -502,7 +502,7 @@ module.exports = {
 					// m2 models
 					let m2_drawn = 0;
 					if (this._m2_renderer) {
-						this._m2_renderer.update(cam);
+						this._m2_renderer.update(cam, dt);
 
 						m2_drawn = this._m2_renderer.render(
 							this._camera.view_matrix, this._camera.projection_matrix,

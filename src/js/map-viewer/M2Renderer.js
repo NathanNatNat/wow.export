@@ -9,6 +9,7 @@ const constants = require('../constants');
 const Shaders = require('../3D/Shaders');
 const ShaderMapper = require('../3D/ShaderMapper');
 const VertexArray = require('../3D/gl/VertexArray');
+const UniformBuffer = require('../3D/gl/UniformBuffer');
 const GLTexture = require('../3D/gl/GLTexture');
 const GLContext = require('../3D/gl/GLContext');
 const BLPFile = require('../casc/blp');
@@ -23,8 +24,13 @@ const MAX_OBJ0_CONCURRENT = 4;
 const MAX_M2_CONCURRENT = 2;
 const UPLOAD_BUDGET = 2;
 const CAMERA_DIRTY_THRESHOLD_SQ = 33.33 * 33.33;
-const M2_VERTEX_STRIDE = 40;
+const M2_VERTEX_STRIDE = 48;
+const MAX_BONES = 256;
 const ALPHA_TEST_VALUE = 0.501960814;
+
+// stand animation ID 0, fallback to closed (147)
+const ANIM_STAND = 0;
+const ANIM_CLOSED = 147;
 
 const BBOX_COLOR = new Float32Array([1, 1, 1]);
 
@@ -147,7 +153,7 @@ function compute_model_matrix(position, rotation, scale) {
 /**
  * build interleaved vertex + index data from parsed M2 and Skin.
  * vertices are stored in raw wow local coords (un-swizzled from M2Loader output).
- * format: position(3f) + normal(3f) + uv(2f) + uv2(2f) = 40 bytes
+ * format: position(3f) + normal(3f) + bone_idx(4ub) + bone_weight(4ub) + uv(2f) + uv2(2f) = 48 bytes
  */
 function build_model_geometry(m2, skin) {
 	const vertex_count = m2.vertices.length / 3;
@@ -156,11 +162,13 @@ function build_model_geometry(m2, skin) {
 
 	const vertex_data = new ArrayBuffer(vertex_count * M2_VERTEX_STRIDE);
 	const view = new DataView(vertex_data);
+	const has_bones = m2.boneIndices && m2.boneWeights;
 
 	for (let i = 0; i < vertex_count; i++) {
 		const offset = i * M2_VERTEX_STRIDE;
 		const v = i * 3;
 		const uv = i * 2;
+		const bi = i * 4;
 
 		view.setFloat32(offset, m2.vertices[v], true);
 		view.setFloat32(offset + 4, m2.vertices[v + 1], true);
@@ -170,11 +178,22 @@ function build_model_geometry(m2, skin) {
 		view.setFloat32(offset + 16, m2.normals[v + 1], true);
 		view.setFloat32(offset + 20, m2.normals[v + 2], true);
 
-		view.setFloat32(offset + 24, m2.uv[uv], true);
-		view.setFloat32(offset + 28, m2.uv[uv + 1], true);
+		if (has_bones) {
+			view.setUint8(offset + 24, m2.boneIndices[bi]);
+			view.setUint8(offset + 25, m2.boneIndices[bi + 1]);
+			view.setUint8(offset + 26, m2.boneIndices[bi + 2]);
+			view.setUint8(offset + 27, m2.boneIndices[bi + 3]);
+			view.setUint8(offset + 28, m2.boneWeights[bi]);
+			view.setUint8(offset + 29, m2.boneWeights[bi + 1]);
+			view.setUint8(offset + 30, m2.boneWeights[bi + 2]);
+			view.setUint8(offset + 31, m2.boneWeights[bi + 3]);
+		}
 
-		view.setFloat32(offset + 32, m2.uv2[uv], true);
-		view.setFloat32(offset + 36, m2.uv2[uv + 1], true);
+		view.setFloat32(offset + 32, m2.uv[uv], true);
+		view.setFloat32(offset + 36, m2.uv[uv + 1], true);
+
+		view.setFloat32(offset + 40, m2.uv2[uv], true);
+		view.setFloat32(offset + 44, m2.uv2[uv + 1], true);
 	}
 
 	// map triangle indices through skin indirection
@@ -183,6 +202,302 @@ function build_model_geometry(m2, skin) {
 		index_data[i] = skin.indices[skin.triangles[i]];
 
 	return { vertex_data, index_data, index_count: index_data.length };
+}
+
+// ---- animation utilities ----
+
+const IDENTITY_MAT4 = new Float32Array([
+	1, 0, 0, 0,
+	0, 1, 0, 0,
+	0, 0, 1, 0,
+	0, 0, 0, 1
+]);
+
+function find_keyframe(timestamps, time) {
+	let lo = 0, hi = timestamps.length - 1;
+	while (lo < hi) {
+		const mid = (lo + hi + 1) >> 1;
+		if (timestamps[mid] <= time)
+			lo = mid;
+		else
+			hi = mid - 1;
+	}
+	return lo;
+}
+
+function lerp(a, b, t) {
+	return a + (b - a) * t;
+}
+
+function quat_slerp(out, ax, ay, az, aw, bx, by, bz, bw, t) {
+	let cosom = ax * bx + ay * by + az * bz + aw * bw;
+
+	if (cosom < 0) {
+		cosom = -cosom;
+		bx = -bx; by = -by; bz = -bz; bw = -bw;
+	}
+
+	let scale0, scale1;
+	if (1 - cosom > 0.000001) {
+		const omega = Math.acos(cosom);
+		const sinom = Math.sin(omega);
+		scale0 = Math.sin((1 - t) * omega) / sinom;
+		scale1 = Math.sin(t * omega) / sinom;
+	} else {
+		scale0 = 1 - t;
+		scale1 = t;
+	}
+
+	out[0] = scale0 * ax + scale1 * bx;
+	out[1] = scale0 * ay + scale1 * by;
+	out[2] = scale0 * az + scale1 * bz;
+	out[3] = scale0 * aw + scale1 * bw;
+}
+
+function sample_vec3(timestamps, values, time_ms) {
+	if (!timestamps || timestamps.length === 0)
+		return null;
+
+	if (timestamps.length === 1 || time_ms <= timestamps[0])
+		return values[0];
+
+	if (time_ms >= timestamps[timestamps.length - 1])
+		return values[values.length - 1];
+
+	const frame = find_keyframe(timestamps, time_ms);
+	const t0 = timestamps[frame];
+	const t1 = timestamps[frame + 1];
+	const dt = t1 - t0;
+	const alpha = dt > 0 ? Math.min((time_ms - t0) / dt, 1) : 0;
+
+	const v0 = values[frame];
+	const v1 = values[frame + 1];
+
+	return [
+		lerp(v0[0], v1[0], alpha),
+		lerp(v0[1], v1[1], alpha),
+		lerp(v0[2], v1[2], alpha)
+	];
+}
+
+function sample_quat(timestamps, values, time_ms) {
+	if (!timestamps || timestamps.length === 0)
+		return null;
+
+	if (timestamps.length === 1 || time_ms <= timestamps[0])
+		return values[0];
+
+	if (time_ms >= timestamps[timestamps.length - 1])
+		return values[values.length - 1];
+
+	const frame = find_keyframe(timestamps, time_ms);
+	const t0 = timestamps[frame];
+	const t1 = timestamps[frame + 1];
+	const dt = t1 - t0;
+	const alpha = dt > 0 ? Math.min((time_ms - t0) / dt, 1) : 0;
+
+	const q0 = values[frame];
+	const q1 = values[frame + 1];
+
+	const out = [0, 0, 0, 1];
+	quat_slerp(out, q0[0], q0[1], q0[2], q0[3], q1[0], q1[1], q1[2], q1[3], alpha);
+	return out;
+}
+
+// scratch matrices for bone computation (shared across all models)
+const _s_local = new Float32Array(16);
+const _s_trans = new Float32Array(16);
+const _s_rot = new Float32Array(16);
+const _s_scale = new Float32Array(16);
+const _s_pivot = new Float32Array(16);
+const _s_neg_pivot = new Float32Array(16);
+const _s_result = new Float32Array(16);
+const _s_calculated = new Uint8Array(MAX_BONES);
+
+function mat4_multiply(out, a, b) {
+	const a00 = a[0], a01 = a[1], a02 = a[2], a03 = a[3];
+	const a10 = a[4], a11 = a[5], a12 = a[6], a13 = a[7];
+	const a20 = a[8], a21 = a[9], a22 = a[10], a23 = a[11];
+	const a30 = a[12], a31 = a[13], a32 = a[14], a33 = a[15];
+
+	let b0 = b[0], b1 = b[1], b2 = b[2], b3 = b[3];
+	out[0] = b0 * a00 + b1 * a10 + b2 * a20 + b3 * a30;
+	out[1] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
+	out[2] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
+	out[3] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
+
+	b0 = b[4]; b1 = b[5]; b2 = b[6]; b3 = b[7];
+	out[4] = b0 * a00 + b1 * a10 + b2 * a20 + b3 * a30;
+	out[5] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
+	out[6] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
+	out[7] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
+
+	b0 = b[8]; b1 = b[9]; b2 = b[10]; b3 = b[11];
+	out[8] = b0 * a00 + b1 * a10 + b2 * a20 + b3 * a30;
+	out[9] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
+	out[10] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
+	out[11] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
+
+	b0 = b[12]; b1 = b[13]; b2 = b[14]; b3 = b[15];
+	out[12] = b0 * a00 + b1 * a10 + b2 * a20 + b3 * a30;
+	out[13] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
+	out[14] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
+	out[15] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
+}
+
+function mat4_from_translation(out, x, y, z) {
+	out[0] = 1; out[1] = 0; out[2] = 0; out[3] = 0;
+	out[4] = 0; out[5] = 1; out[6] = 0; out[7] = 0;
+	out[8] = 0; out[9] = 0; out[10] = 1; out[11] = 0;
+	out[12] = x; out[13] = y; out[14] = z; out[15] = 1;
+}
+
+function mat4_from_quat(out, x, y, z, w) {
+	const x2 = x + x, y2 = y + y, z2 = z + z;
+	const xx = x * x2, xy = x * y2, xz = x * z2;
+	const yy = y * y2, yz = y * z2, zz = z * z2;
+	const wx = w * x2, wy = w * y2, wz = w * z2;
+
+	out[0] = 1 - (yy + zz); out[1] = xy + wz; out[2] = xz - wy; out[3] = 0;
+	out[4] = xy - wz; out[5] = 1 - (xx + zz); out[6] = yz + wx; out[7] = 0;
+	out[8] = xz + wy; out[9] = yz - wx; out[10] = 1 - (xx + yy); out[11] = 0;
+	out[12] = 0; out[13] = 0; out[14] = 0; out[15] = 1;
+}
+
+function mat4_from_scale(out, x, y, z) {
+	out[0] = x; out[1] = 0; out[2] = 0; out[3] = 0;
+	out[4] = 0; out[5] = y; out[6] = 0; out[7] = 0;
+	out[8] = 0; out[9] = 0; out[10] = z; out[11] = 0;
+	out[12] = 0; out[13] = 0; out[14] = 0; out[15] = 1;
+}
+
+/**
+ * find animation index by animation ID.
+ * tries primary ID, then fallback ID, then returns -1.
+ */
+function find_anim_index(animations, primary_id, fallback_id) {
+	if (!animations || animations.length === 0)
+		return -1;
+
+	let primary = -1;
+	let fallback = -1;
+
+	for (let i = 0; i < animations.length; i++) {
+		if (animations[i].id === primary_id) {
+			primary = i;
+			break;
+		}
+		if (fallback_id !== undefined && animations[i].id === fallback_id)
+			fallback = i;
+	}
+
+	if (primary >= 0)
+		return primary;
+
+	return fallback;
+}
+
+/**
+ * compute bone matrices for a model at a given animation time.
+ * writes results into the provided bone_matrices Float32Array.
+ */
+function compute_bone_matrices(bones, anim_idx, time_ms, bone_matrices, global_seq_times, global_loops) {
+	const bone_count = Math.min(bones.length, MAX_BONES);
+	_s_calculated.fill(0);
+
+	const calc_bone = (idx) => {
+		if (_s_calculated[idx])
+			return;
+
+		const bone = bones[idx];
+		const parent_idx = bone.parentBone;
+
+		if (parent_idx >= 0 && parent_idx < bone_count)
+			calc_bone(parent_idx);
+
+		const pivot = bone.pivot;
+		const px = pivot[0], py = pivot[1], pz = pivot[2];
+
+		// resolve effective time for tracks with global sequences
+		const resolve_time = (track) => {
+			const gs = track.globalSeq;
+			if (gs !== undefined && global_loops && gs < global_loops.length) {
+				const gs_dur = global_loops[gs];
+				if (gs_dur > 0 && global_seq_times)
+					return global_seq_times[gs] ?? 0;
+			}
+			return time_ms;
+		};
+
+		const has_trans = bone.translation?.timestamps?.[anim_idx]?.length > 0;
+		const has_rot = bone.rotation?.timestamps?.[anim_idx]?.length > 0;
+		const has_scale = bone.scale?.timestamps?.[anim_idx]?.length > 0;
+		const has_scale_fb = !has_scale && anim_idx !== 0 && bone.scale?.timestamps?.[0]?.length > 0;
+		const has_animation = has_trans || has_rot || has_scale || has_scale_fb;
+
+		_s_local.set(IDENTITY_MAT4);
+
+		if (has_animation) {
+			mat4_from_translation(_s_pivot, px, py, pz);
+			mat4_multiply(_s_result, _s_local, _s_pivot);
+			_s_local.set(_s_result);
+
+			if (has_trans) {
+				const t_time = resolve_time(bone.translation);
+				const ts = bone.translation.timestamps[anim_idx];
+				const vals = bone.translation.values[anim_idx];
+				const t = sample_vec3(ts, vals, t_time);
+				if (t) {
+					mat4_from_translation(_s_trans, t[0], t[1], t[2]);
+					mat4_multiply(_s_result, _s_local, _s_trans);
+					_s_local.set(_s_result);
+				}
+			}
+
+			if (has_rot) {
+				const r_time = resolve_time(bone.rotation);
+				const ts = bone.rotation.timestamps[anim_idx];
+				const vals = bone.rotation.values[anim_idx];
+				const q = sample_quat(ts, vals, r_time);
+				if (q) {
+					mat4_from_quat(_s_rot, q[0], q[1], q[2], q[3]);
+					mat4_multiply(_s_result, _s_local, _s_rot);
+					_s_local.set(_s_result);
+				}
+			}
+
+			if (has_scale || has_scale_fb) {
+				const scale_idx = has_scale ? anim_idx : 0;
+				const s_time = has_scale ? resolve_time(bone.scale) : 0;
+				const ts = bone.scale.timestamps[scale_idx];
+				const vals = bone.scale.values[scale_idx];
+				const s = sample_vec3(ts, vals, s_time);
+				if (s) {
+					mat4_from_scale(_s_scale, s[0], s[1], s[2]);
+					mat4_multiply(_s_result, _s_local, _s_scale);
+					_s_local.set(_s_result);
+				}
+			}
+
+			mat4_from_translation(_s_neg_pivot, -px, -py, -pz);
+			mat4_multiply(_s_result, _s_local, _s_neg_pivot);
+			_s_local.set(_s_result);
+		}
+
+		const offset = idx * 16;
+		if (parent_idx >= 0 && parent_idx < bone_count) {
+			const parent_offset = parent_idx * 16;
+			const parent_mat = bone_matrices.subarray(parent_offset, parent_offset + 16);
+			mat4_multiply(bone_matrices.subarray(offset, offset + 16), parent_mat, _s_local);
+		} else {
+			bone_matrices.set(_s_local, offset);
+		}
+
+		_s_calculated[idx] = 1;
+	};
+
+	for (let i = 0; i < bone_count; i++)
+		calc_bone(i);
 }
 
 /**
@@ -288,6 +603,9 @@ class M2Renderer {
 		this._bbox_vao = null;
 
 		this._default_texture = this._create_default_texture();
+
+		// bind bone UBO block
+		this.shader.bind_uniform_block('BoneMatrices', 0);
 	}
 
 	_create_default_texture() {
@@ -362,7 +680,7 @@ class M2Renderer {
 		this._tile_data.delete(key);
 	}
 
-	update(camera_pos) {
+	update(camera_pos, delta_time = 0) {
 		if (this._disposed)
 			return;
 
@@ -387,6 +705,10 @@ class M2Renderer {
 
 		if (this._instances_dirty)
 			this._rebuild_instance_buffers(camera_pos);
+
+		// advance animations
+		if (delta_time > 0)
+			this._update_animations(delta_time);
 	}
 
 	render(view, proj, light_dir, sun_color, sun_intensity, fog_params) {
@@ -440,6 +762,14 @@ class M2Renderer {
 				continue;
 
 			entry.vao.bind();
+
+			// bind bone UBO for this model
+			if (entry.bone_ubo) {
+				entry.bone_ubo.bind(0);
+				shader.set_uniform_1i('u_bone_count', entry.bone_count);
+			} else {
+				shader.set_uniform_1i('u_bone_count', 0);
+			}
 
 			for (const dc of entry.draw_calls) {
 				shader.set_uniform_1i('u_vertex_shader', dc.vertex_shader);
@@ -605,7 +935,16 @@ class M2Renderer {
 						ref_count: 0,
 						tile_instances: new Map(),
 						bounding_box: null,
-						queued: false
+						queued: false,
+						bones: null,
+						bone_count: 0,
+						bone_ubo: null,
+						bone_matrices: null,
+						anim_index: -1,
+						anim_duration: 0,
+						anim_time: 0,
+						global_loops: null,
+						global_seq_times: null
 					};
 					this._model_cache.set(id, entry);
 				}
@@ -673,6 +1012,42 @@ class M2Renderer {
 				return;
 			}
 
+			// load animation data for stand/idle
+			let bones = null;
+			let bone_count = 0;
+			let anim_index = -1;
+			let anim_duration = 0;
+			let global_loops = [];
+			let global_seq_times = null;
+
+			if (m2.bones && m2.bones.length > 0) {
+				bones = m2.bones;
+				bone_count = Math.min(bones.length, MAX_BONES);
+				global_loops = m2.globalLoops || [];
+				global_seq_times = new Float32Array(global_loops.length);
+
+				anim_index = find_anim_index(m2.animations, ANIM_STAND, ANIM_CLOSED);
+
+				if (anim_index >= 0) {
+					// load external .anim file if needed
+					await m2.loadAnimsForIndex(anim_index);
+
+					const anim = m2.animations[anim_index];
+
+					// resolve alias
+					let resolved_idx = anim_index;
+					let resolved_anim = anim;
+					while (resolved_anim && (resolved_anim.flags & 0x40) === 0x40) {
+						resolved_idx = resolved_anim.aliasNext;
+						resolved_anim = m2.animations[resolved_idx];
+						await m2.loadAnimsForIndex(resolved_idx);
+					}
+
+					anim_index = resolved_idx;
+					anim_duration = m2.animations[anim_index]?.duration ?? 0;
+				}
+			}
+
 			const geo = build_model_geometry(m2, skin);
 			if (!geo) {
 				this._model_loading.delete(file_data_id);
@@ -716,7 +1091,12 @@ class M2Renderer {
 				max: [raw_bb.max[0], raw_bb.max[2], -raw_bb.min[1]]
 			} : null;
 
-			this._upload_queue.push({ file_data_id, draw_calls, texture_loads, bounding_box, ...geo });
+			this._upload_queue.push({
+				file_data_id, draw_calls, texture_loads, bounding_box,
+				bones, bone_count, anim_index, anim_duration,
+				global_loops, global_seq_times,
+				...geo
+			});
 		} catch (e) {
 			log.write('Failed to load M2 model ' + file_data_id + ': ' + e.message);
 		}
@@ -748,16 +1128,20 @@ class M2Renderer {
 		// vertex buffer
 		vao.set_vertex_buffer(data.vertex_data);
 
-		// vertex format: pos(3f) + normal(3f) + uv(2f) + uv2(2f) = 40 bytes
+		// vertex format: pos(3f) + normal(3f) + bone_idx(4ub) + bone_weight(4ub) + uv(2f) + uv2(2f) = 48 bytes
 		const stride = M2_VERTEX_STRIDE;
 		gl.enableVertexAttribArray(0);
 		gl.vertexAttribPointer(0, 3, gl.FLOAT, false, stride, 0);
 		gl.enableVertexAttribArray(1);
 		gl.vertexAttribPointer(1, 3, gl.FLOAT, false, stride, 12);
+		gl.enableVertexAttribArray(2);
+		gl.vertexAttribIPointer(2, 4, gl.UNSIGNED_BYTE, stride, 24);
+		gl.enableVertexAttribArray(3);
+		gl.vertexAttribPointer(3, 4, gl.UNSIGNED_BYTE, true, stride, 28);
 		gl.enableVertexAttribArray(4);
-		gl.vertexAttribPointer(4, 2, gl.FLOAT, false, stride, 24);
+		gl.vertexAttribPointer(4, 2, gl.FLOAT, false, stride, 32);
 		gl.enableVertexAttribArray(5);
-		gl.vertexAttribPointer(5, 2, gl.FLOAT, false, stride, 32);
+		gl.vertexAttribPointer(5, 2, gl.FLOAT, false, stride, 40);
 
 		// index buffer
 		vao.set_index_buffer(data.index_data);
@@ -813,6 +1197,70 @@ class M2Renderer {
 		entry.instance_buffer = instance_buffer;
 		entry.bounding_box = data.bounding_box;
 		entry.queued = false;
+
+		// animation state
+		entry.bones = data.bones;
+		entry.bone_count = data.bone_count;
+		entry.anim_index = data.anim_index;
+		entry.anim_duration = data.anim_duration;
+		entry.anim_time = 0;
+		entry.global_loops = data.global_loops;
+		entry.global_seq_times = data.global_seq_times;
+
+		if (data.bone_count > 0) {
+			const ubo_size = MAX_BONES * 64; // 256 mat4 * 64 bytes
+			const ubo = new UniformBuffer(this.ctx, ubo_size);
+			entry.bone_ubo = ubo;
+			entry.bone_matrices = new Float32Array(data.bone_count * 16);
+
+			// initialize with identity
+			for (let i = 0; i < data.bone_count; i++)
+				entry.bone_matrices.set(IDENTITY_MAT4, i * 16);
+
+			// compute initial pose at time 0
+			if (entry.anim_index >= 0)
+				compute_bone_matrices(entry.bones, entry.anim_index, 0, entry.bone_matrices, entry.global_seq_times, entry.global_loops);
+
+			ubo.set_mat4_array(0, entry.bone_matrices, data.bone_count);
+			ubo.upload();
+		} else {
+			entry.bone_ubo = null;
+			entry.bone_matrices = null;
+		}
+	}
+
+	_update_animations(dt) {
+		const dt_ms = dt * 1000;
+
+		for (const entry of this._model_cache.values()) {
+			if (!entry.bone_ubo || entry.anim_index < 0 || entry.instance_count === 0)
+				continue;
+
+			// advance time
+			entry.anim_time += dt_ms;
+			if (entry.anim_duration > 0)
+				entry.anim_time %= entry.anim_duration;
+
+			// advance global sequence timers
+			if (entry.global_seq_times) {
+				for (let i = 0; i < entry.global_seq_times.length; i++) {
+					entry.global_seq_times[i] += dt_ms;
+					const gs_dur = entry.global_loops[i];
+					if (gs_dur > 0)
+						entry.global_seq_times[i] %= gs_dur;
+				}
+			}
+
+			// compute bone matrices
+			compute_bone_matrices(
+				entry.bones, entry.anim_index, entry.anim_time,
+				entry.bone_matrices, entry.global_seq_times, entry.global_loops
+			);
+
+			// upload to GPU
+			entry.bone_ubo.set_mat4_array(0, entry.bone_matrices, entry.bone_count);
+			entry.bone_ubo.upload();
+		}
 	}
 
 	_rebuild_instance_buffers(camera_pos) {
@@ -913,6 +1361,9 @@ class M2Renderer {
 
 		if (entry.instance_buffer)
 			this.gl.deleteBuffer(entry.instance_buffer);
+
+		if (entry.bone_ubo)
+			entry.bone_ubo.dispose();
 
 		this._model_cache.delete(file_data_id);
 	}

@@ -4,6 +4,8 @@ precision highp int;
 
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec3 a_normal;
+layout(location = 2) in uvec4 a_bone_indices;
+layout(location = 3) in vec4 a_bone_weights;
 layout(location = 4) in vec2 a_texcoord;
 layout(location = 5) in vec2 a_texcoord2;
 
@@ -16,6 +18,13 @@ layout(location = 9) in vec4 a_model_col3;
 uniform mat4 u_view;
 uniform mat4 u_projection;
 uniform int u_vertex_shader;
+
+// bone skinning
+#define MAX_BONES 256
+uniform int u_bone_count;
+layout(std140) uniform BoneMatrices {
+	mat4 u_bone_matrices[MAX_BONES];
+};
 
 out vec3 v_normal;
 out vec3 v_position;
@@ -37,13 +46,36 @@ float calc_edge_fade(vec3 pos_view, vec3 normal_view) {
 }
 
 void main() {
+	// bone skinning
+	vec4 skinned_pos;
+	vec3 skinned_normal;
+
+	if (u_bone_count > 0) {
+		float total_weight = dot(a_bone_weights, vec4(1.0));
+		if (total_weight > 0.0) {
+			mat4 bone_transform = mat4(0.0);
+			bone_transform += a_bone_weights.x * u_bone_matrices[a_bone_indices.x];
+			bone_transform += a_bone_weights.y * u_bone_matrices[a_bone_indices.y];
+			bone_transform += a_bone_weights.z * u_bone_matrices[a_bone_indices.z];
+			bone_transform += a_bone_weights.w * u_bone_matrices[a_bone_indices.w];
+			skinned_pos = bone_transform * vec4(a_position, 1.0);
+			skinned_normal = mat3(bone_transform) * a_normal;
+		} else {
+			skinned_pos = vec4(a_position, 1.0);
+			skinned_normal = a_normal;
+		}
+	} else {
+		skinned_pos = vec4(a_position, 1.0);
+		skinned_normal = a_normal;
+	}
+
 	mat4 model = mat4(a_model_col0, a_model_col1, a_model_col2, a_model_col3);
-	vec4 world_pos = model * vec4(a_position, 1.0);
+	vec4 world_pos = model * skinned_pos;
 	vec4 view_pos = u_view * world_pos;
 	gl_Position = u_projection * view_pos;
 
 	// world-space normal for fragment lighting
-	v_normal = normalize(mat3(model) * a_normal);
+	v_normal = normalize(mat3(model) * skinned_normal);
 	v_position = world_pos.xyz;
 	v_edge_fade = 1.0;
 
