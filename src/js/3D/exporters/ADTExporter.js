@@ -1395,7 +1395,7 @@ class ADTExporter {
 					let worldModelIndex = 0;
 					const usingNames = !!objAdt.wmoNames;
 					for (const model of objAdt.worldModels) {
-						const useADTSets = model & 0x80;
+						const useADTSets = model.flags & 0x80;
 						helper.setCurrentTaskValue(worldModelIndex++);
 
 						let fileDataID;
