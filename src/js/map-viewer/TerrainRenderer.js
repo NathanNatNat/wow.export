@@ -60,6 +60,9 @@ class TerrainRenderer {
 		this._wdt = null;
 		this._tex_loader = null;
 
+		this._on_tile_load = null;
+		this._on_tile_unload = null;
+
 		this._last_tx = NaN;
 		this._last_ty = NaN;
 		this._last_cx = NaN;
@@ -143,7 +146,7 @@ class TerrainRenderer {
 				if (!wdt.tiles[idx])
 					continue;
 
-				let root_id, tex0_id;
+				let root_id, tex0_id, obj0_id;
 
 				if (has_maid) {
 					const entry = wdt.entries[idx];
@@ -152,17 +155,19 @@ class TerrainRenderer {
 
 					root_id = entry.rootADT;
 					tex0_id = entry.tex0ADT;
+					obj0_id = entry.obj0ADT;
 				} else {
 					const tile_prefix = prefix + '_' + x + '_' + y;
 					root_id = listfile.getByFilename(tile_prefix + '.adt');
 					tex0_id = listfile.getByFilename(tile_prefix + '_tex0.adt');
+					obj0_id = listfile.getByFilename(tile_prefix + '_obj0.adt');
 
 					if (!root_id)
 						continue;
 				}
 
 				const key = x + '_' + y;
-				this._tile_info.set(key, { root_id, tex0_id, x, y });
+				this._tile_info.set(key, { root_id, tex0_id, obj0_id, x, y });
 
 				if (x < min_tx) min_tx = x;
 				if (y < min_ty) min_ty = y;
@@ -238,6 +243,9 @@ class TerrainRenderer {
 				this._release_vao(tile.vao);
 				this._chunk_count -= tile.chunk_count;
 				this._tiles.delete(key);
+
+				if (this._on_tile_unload)
+					this._on_tile_unload(key);
 			}
 		}
 
@@ -423,6 +431,9 @@ class TerrainRenderer {
 			this._chunk_count += tile.chunk_count;
 			this._grid_dirty = true;
 			this._chunk_grid_dirty = true;
+
+			if (this._on_tile_load)
+				this._on_tile_load(key, this._tile_info.get(key));
 		}
 	}
 

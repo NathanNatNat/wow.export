@@ -4,6 +4,7 @@ const GLContext = require('../3D/gl/GLContext');
 const PerspectiveCamera = require('./PerspectiveCamera');
 const FreeCameraControls = require('./FreeCameraControls');
 const TerrainRenderer = require('./TerrainRenderer');
+const M2Renderer = require('./M2Renderer');
 const Minimap = require('./Minimap');
 
 const TILE_SIZE = constants.GAME.TILE_SIZE;
@@ -24,6 +25,8 @@ const SECTIONS = [
 		label: 'Rendering',
 		controls: [
 			{ type: 'slider', key: 'mapViewerRenderDistance', label: 'Render Distance', min: 1, max: 256, step: 1 },
+			{ type: 'checkbox', key: 'mapViewerShowM2Models', label: 'Show M2 Models' },
+			{ type: 'slider', key: 'mapViewerM2RenderDistance', label: 'M2 Render Distance', min: 50, max: 64000, step: 50 },
 			{ type: 'color', key: 'mapViewerSkyColor', label: 'Sky Colour' }
 		]
 	},
@@ -207,6 +210,16 @@ module.exports = {
 				this._terrain.sun_color = hex_to_rgb(val);
 		},
 
+		'config.mapViewerShowM2Models'(val) {
+			if (this._m2_renderer)
+				this._m2_renderer.enabled = val;
+		},
+
+		'config.mapViewerM2RenderDistance'(val) {
+			if (this._m2_renderer)
+				this._m2_renderer.set_render_distance(val);
+		},
+
 		'config.mapViewerShowMinimap'(val) {
 			if (val)
 				this._init_minimap();
@@ -367,9 +380,30 @@ module.exports = {
 					if (this.show_adt_bounds)
 						this._terrain.render_grid(this._camera.view_matrix, this._camera.projection_matrix, GRID_COLOR);
 
+					// m2 models
+					let m2_drawn = 0;
+					if (this._m2_renderer) {
+						this._m2_renderer.update(cam);
+						m2_drawn = this._m2_renderer.render(
+							this._camera.view_matrix, this._camera.projection_matrix,
+							this._terrain.light_dir, this._terrain.sun_color, this._terrain.sun_intensity
+						);
+						this._gl_ctx.set_depth_test(true);
+					}
+
 					const loaded = this._terrain.tile_count;
 					const loading = this._terrain.loading_count;
-					this.status_text = loaded + ' ADT (' + loading + ' queued), render (' + visible + '/' + this._terrain.chunk_count + ')';
+					let status = loaded + ' ADT (' + loading + ' queued), render (' + visible + '/' + this._terrain.chunk_count + ')';
+
+					if (this._m2_renderer) {
+						const m2_models = this._m2_renderer.model_count;
+						const m2_loading = this._m2_renderer.loading_count;
+						status += ' | M2: ' + m2_drawn + ' inst, ' + m2_models + ' models';
+						if (m2_loading > 0)
+							status += ' (' + m2_loading + ' loading)';
+					}
+
+					this.status_text = status;
 
 					const adt_x = Math.floor(32 - cam[2] / TILE_SIZE);
 					const adt_y = Math.floor(32 - cam[0] / TILE_SIZE);
@@ -414,6 +448,15 @@ module.exports = {
 				this.status_text = 'Loading WDT...';
 				await terrain.init(map_dir);
 				terrain.set_render_distance(core.view.config.mapViewerRenderDistance);
+
+				const m2 = new M2Renderer(this._gl_ctx);
+				m2.enabled = core.view.config.mapViewerShowM2Models;
+				m2.set_render_distance(core.view.config.mapViewerM2RenderDistance);
+
+				terrain._on_tile_load = (key, info) => m2.on_tile_loaded(key, info);
+				terrain._on_tile_unload = (key) => m2.on_tile_unloaded(key);
+
+				this._m2_renderer = m2;
 				this._terrain = terrain;
 				this._apply_sun_settings();
 				this._position_camera();
@@ -482,6 +525,11 @@ module.exports = {
 			if (this._controls) {
 				this._controls.dispose();
 				this._controls = null;
+			}
+
+			if (this._m2_renderer) {
+				this._m2_renderer.dispose();
+				this._m2_renderer = null;
 			}
 
 			if (this._terrain) {

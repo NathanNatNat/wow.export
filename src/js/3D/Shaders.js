@@ -20,7 +20,8 @@ const SHADER_MANIFEST = {
 	mpv_terrain_wire: { vert: 'mpv_terrain.vertex.shader', frag: 'mpv_terrain_wire.fragment.shader' },
 	mpv_terrain_minimap: { vert: 'mpv_terrain_tex.vertex.shader', frag: 'mpv_terrain_minimap.fragment.shader' },
 	mpv_terrain_full: { vert: 'mpv_terrain_full.vertex.shader', frag: 'mpv_terrain_full.fragment.shader' },
-	mpv_terrain_full_legacy: { vert: 'mpv_terrain_full.vertex.shader', frag: 'mpv_terrain_full_legacy.fragment.shader' }
+	mpv_terrain_full_legacy: { vert: 'mpv_terrain_full.vertex.shader', frag: 'mpv_terrain_full_legacy.fragment.shader' },
+	mpv_m2: { vert: 'mpv_m2.vertex.shader', frag: 'mpv_m2.fragment.shader' }
 };
 
 // cached shader source text
