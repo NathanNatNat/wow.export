@@ -68,10 +68,6 @@ class TerrainRenderer {
 		this._last_cx = NaN;
 		this._last_cy = NaN;
 
-		this.light_dir = new Float32Array([-0.4394, 0.8192, 0.3687]);
-		this.sun_color = new Float32Array([1.0, 0.95, 0.85]);
-		this.sun_intensity = 1.0;
-
 		this.light_uniforms = null;
 
 		this.fog_enabled = false;
@@ -1220,23 +1216,14 @@ class TerrainRenderer {
 
 	_set_light_uniforms(shader) {
 		const lu = this.light_uniforms;
-		if (lu) {
-			shader.set_uniform_3fv('u_light_dir', lu.light_dir);
-			shader.set_uniform_3fv('u_ambient_color', lu.ambient_color);
-			shader.set_uniform_3fv('u_horizon_ambient_color', lu.horizon_ambient_color);
-			shader.set_uniform_3fv('u_ground_ambient_color', lu.ground_ambient_color);
-			shader.set_uniform_3fv('u_direct_color', lu.direct_color);
-		} else {
-			shader.set_uniform_3fv('u_light_dir', this.light_dir);
-			shader.set_uniform_3fv('u_ambient_color', this.sun_color);
-			shader.set_uniform_3fv('u_horizon_ambient_color', this.sun_color);
-			shader.set_uniform_3fv('u_ground_ambient_color', new Float32Array([0.35, 0.3, 0.25]));
-			shader.set_uniform_3fv('u_direct_color', new Float32Array([
-				this.sun_color[0] * this.sun_intensity,
-				this.sun_color[1] * this.sun_intensity,
-				this.sun_color[2] * this.sun_intensity
-			]));
-		}
+		if (!lu)
+			return;
+
+		shader.set_uniform_3fv('u_light_dir', lu.light_dir);
+		shader.set_uniform_3fv('u_ambient_color', lu.ambient_color);
+		shader.set_uniform_3fv('u_horizon_ambient_color', lu.horizon_ambient_color);
+		shader.set_uniform_3fv('u_ground_ambient_color', lu.ground_ambient_color);
+		shader.set_uniform_3fv('u_direct_color', lu.direct_color);
 	}
 
 	_set_fog_uniforms(shader) {

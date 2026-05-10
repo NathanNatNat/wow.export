@@ -45,16 +45,6 @@ const SECTIONS = [
 		]
 	},
 	{
-		id: 'lighting',
-		label: 'Lighting',
-		controls: [
-			{ type: 'slider', key: 'mapViewerSunAzimuth', label: 'Sun Azimuth', min: 0, max: 360, step: 1 },
-			{ type: 'slider', key: 'mapViewerSunElevation', label: 'Sun Elevation', min: 0, max: 90, step: 1 },
-			{ type: 'slider', key: 'mapViewerSunIntensity', label: 'Sun Intensity', min: 0, max: 100, step: 1 },
-			{ type: 'color', key: 'mapViewerSunColor', label: 'Sun Colour' }
-		]
-	},
-	{
 		id: 'terrain',
 		label: 'Terrain',
 		controls: [
@@ -84,12 +74,6 @@ function hex_to_rgb(hex) {
 	return new Float32Array([r, g, b]);
 }
 
-function compute_light_dir(azimuth_deg, elevation_deg) {
-	const az = azimuth_deg * Math.PI / 180;
-	const el = elevation_deg * Math.PI / 180;
-	const cos_el = Math.cos(el);
-	return new Float32Array([cos_el * Math.sin(az), Math.sin(el), cos_el * Math.cos(az)]);
-}
 
 module.exports = {
 	template: `<div class="map-viewer-screen">
@@ -222,23 +206,6 @@ module.exports = {
 			this._wireframe_color = hex_to_rgb(val);
 		},
 
-		'config.mapViewerSunAzimuth'() {
-			this._update_light_dir();
-		},
-
-		'config.mapViewerSunElevation'() {
-			this._update_light_dir();
-		},
-
-		'config.mapViewerSunIntensity'(val) {
-			if (this._terrain)
-				this._terrain.sun_intensity = val / 100;
-		},
-
-		'config.mapViewerSunColor'(val) {
-			if (this._terrain)
-				this._terrain.sun_color = hex_to_rgb(val);
-		},
 
 		'config.mapViewerFogEnabled'(val) {
 			if (this._terrain)
@@ -644,7 +611,7 @@ module.exports = {
 				this._fog_provider = new FogDataProvider(map_id);
 				this._fog_provider.load();
 
-				this._apply_sun_settings();
+				this._apply_initial_settings();
 				this._position_camera();
 				this._init_minimap();
 				this._init_liquid_db();
@@ -654,18 +621,10 @@ module.exports = {
 			}
 		},
 
-		_update_light_dir() {
-			if (this._terrain)
-				this._terrain.light_dir = compute_light_dir(this.config.mapViewerSunAzimuth, this.config.mapViewerSunElevation);
-		},
-
-		_apply_sun_settings() {
+		_apply_initial_settings() {
 			if (!this._terrain)
 				return;
 
-			this._terrain.light_dir = compute_light_dir(this.config.mapViewerSunAzimuth, this.config.mapViewerSunElevation);
-			this._terrain.sun_color = hex_to_rgb(this.config.mapViewerSunColor);
-			this._terrain.sun_intensity = this.config.mapViewerSunIntensity / 100;
 			this._terrain.fog_enabled = this.config.mapViewerFogEnabled;
 		},
 
