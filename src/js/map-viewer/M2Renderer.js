@@ -161,7 +161,8 @@ class M2Renderer {
 			placements: null
 		});
 
-		this._obj0_load_queue.push(key);
+		if (this.enabled)
+			this._obj0_load_queue.push(key);
 	}
 
 	on_tile_unloaded(key) {
@@ -199,8 +200,11 @@ class M2Renderer {
 			return;
 
 		this._process_uploads();
-		this._pump_obj0_queue();
-		this._pump_model_queue();
+
+		if (this.enabled) {
+			this._pump_obj0_queue();
+			this._pump_model_queue();
+		}
 
 		const dx = camera_pos[0] - this._last_cam[0];
 		const dy = camera_pos[1] - this._last_cam[1];
@@ -209,6 +213,9 @@ class M2Renderer {
 		if (dx * dx + dy * dy + dz * dz > CAMERA_DIRTY_THRESHOLD_SQ) {
 			this._instances_dirty = true;
 			this._last_cam.set(camera_pos);
+
+			if (this.enabled)
+				this._queue_in_range_models();
 		}
 
 		if (this._instances_dirty)
@@ -259,6 +266,26 @@ class M2Renderer {
 
 		this.render_distance = value;
 		this._instances_dirty = true;
+
+		if (this.enabled)
+			this._queue_in_range_models();
+	}
+
+	set_enabled(val) {
+		if (this.enabled === val)
+			return;
+
+		this.enabled = val;
+
+		if (val) {
+			// queue obj0 loading for tiles that arrived while disabled
+			for (const [key, data] of this._tile_data) {
+				if (!data.loaded && !this._obj0_loading.has(key))
+					this._obj0_load_queue.push(key);
+			}
+
+			this._queue_in_range_models();
+		}
 	}
 
 	_pump_obj0_queue() {
@@ -355,7 +382,7 @@ class M2Renderer {
 				entry.ref_count++;
 				entry.tile_instances.set(key, instances);
 
-				if (!entry.vao && !entry.queued && !this._model_loading.has(id)) {
+				if (!entry.vao && !entry.queued && !this._model_loading.has(id) && this._has_in_range_instances(entry)) {
 					entry.queued = true;
 					this._model_load_queue.push(id);
 				}
@@ -518,6 +545,36 @@ class M2Renderer {
 
 			gl.bindBuffer(gl.ARRAY_BUFFER, entry.instance_buffer);
 			gl.bufferData(gl.ARRAY_BUFFER, buf, gl.DYNAMIC_DRAW);
+		}
+	}
+
+	_has_in_range_instances(entry) {
+		const rd_sq = this.render_distance * this.render_distance;
+		const cam = this._last_cam;
+
+		for (const instances of entry.tile_instances.values()) {
+			for (const inst of instances) {
+				const dx = inst.world_pos[0] - cam[0];
+				const dy = inst.world_pos[1] - cam[1];
+				const dz = inst.world_pos[2] - cam[2];
+
+				if (dx * dx + dy * dy + dz * dz <= rd_sq)
+					return true;
+			}
+		}
+
+		return false;
+	}
+
+	_queue_in_range_models() {
+		for (const [id, entry] of this._model_cache) {
+			if (entry.vao || entry.queued || this._model_loading.has(id))
+				continue;
+
+			if (this._has_in_range_instances(entry)) {
+				entry.queued = true;
+				this._model_load_queue.push(id);
+			}
 		}
 	}
 

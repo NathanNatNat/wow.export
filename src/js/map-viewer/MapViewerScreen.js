@@ -236,7 +236,7 @@ module.exports = {
 
 		'config.mapViewerShowM2Models'(val) {
 			if (this._m2_renderer)
-				this._m2_renderer.enabled = val;
+				this._m2_renderer.set_enabled(val);
 		},
 
 		'config.mapViewerM2RenderDistance'(val) {
@@ -483,7 +483,7 @@ module.exports = {
 				terrain.set_render_distance(core.view.config.mapViewerRenderDistance);
 
 				const m2 = new M2Renderer(this._gl_ctx);
-				m2.enabled = core.view.config.mapViewerShowM2Models;
+				m2.set_enabled(core.view.config.mapViewerShowM2Models);
 				m2.set_render_distance(core.view.config.mapViewerM2RenderDistance);
 
 				terrain._on_tile_load = (key, info) => m2.on_tile_loaded(key, info);
