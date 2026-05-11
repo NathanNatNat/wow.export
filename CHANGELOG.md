@@ -1,5 +1,6 @@
 ## 0.2.18 (11-05-2026)
 - Fixed GLTF primitives missing material index crashing Unreal Engine.
+- Improved rendering of WMO models in the map viewer.
 
 ## 0.2.17 (09-05-2026)
 - Implemented a new map viewer tool for exploring maps in 3D directly in wow.export.
