@@ -1107,7 +1107,7 @@ class GLTFWriter {
 						attributes: primitive_attributes,
 						indices: accessorIndex,
 						mode: GLTF_TRIANGLES,
-						material: materialMap.get(mesh.matName)
+						material: materialMap.get(mesh.matName) ?? 0
 					}
 				]
 			});
@@ -1393,7 +1393,7 @@ class GLTFWriter {
 						attributes: eq_prim_attribs,
 						indices: accessorIndex,
 						mode: GLTF_TRIANGLES,
-						material: materialMap.get(mesh.matName)
+						material: materialMap.get(mesh.matName) ?? 0
 					}]
 				});
 
