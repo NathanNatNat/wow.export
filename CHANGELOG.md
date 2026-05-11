@@ -1,3 +1,6 @@
+## 0.2.18 (11-05-2026)
+- Fixed GLTF primitives missing material index crashing Unreal Engine.
+
 ## 0.2.17 (09-05-2026)
 - Implemented a new map viewer tool for exploring maps in 3D directly in wow.export.
 - Implemented a new "ADT LoD" option for terrain exporting which uses the in-game LoD textures.
