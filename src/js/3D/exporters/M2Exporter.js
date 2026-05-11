@@ -385,7 +385,7 @@ class M2Exporter {
 			if (texture?.fileDataID && textureMap.has(texture.fileDataID))
 				matName = textureMap.get(texture.fileDataID).matName;
 
-			if (this.dataTextures.has(this.m2.textureTypes[this.m2.textureCombos[texUnit.textureComboIndex]])) {
+			if (texUnit && this.dataTextures.has(this.m2.textureTypes[this.m2.textureCombos[texUnit.textureComboIndex]])) {
 				const dataTextureKey = 'data-' + this.m2.textureTypes[this.m2.textureCombos[texUnit.textureComboIndex]];
 				if (textureMap.has(dataTextureKey))
 					matName = textureMap.get(dataTextureKey).matName;
