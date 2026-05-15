@@ -131,6 +131,7 @@ const makeNewView = () => {
 		videoPlayerState: false, // Playing state of the video player.
 		modelViewerContext: null, // 3D context for the model viewer.
 		modelViewerActiveType: 'none', // Type of model actively selected ('m2', 'wmo', 'none').
+		modelViewerWMOHasMinimap: false, // Whether the active WMO has minimap textures.
 		modelViewerGeosets: [], // Active M2 model geoset control.
 		modelViewerSkins: [], // Active M2 model skins.
 		modelViewerSkinsSelection: [], // Selected M2 model skins.

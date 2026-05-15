@@ -1891,7 +1891,8 @@ input[type=number]::-webkit-outer-spin-button {
 	grid-row: 2;
 }
 
-.spaced-preview-controls input {
+.spaced-preview-controls input,
+#tab-models .preview-controls input {
 	margin-left: 5px;
 }
 

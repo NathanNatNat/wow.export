@@ -14,6 +14,7 @@ const DBCreatures = require('../db/caches/DBCreatures');
 const textureRibbon = require('../ui/texture-ribbon');
 const textureExporter = require('../ui/texture-exporter');
 const modelViewerUtils = require('../ui/model-viewer-utils');
+const wmo_minimap = require('../wmo-minimap');
 
 const active_skins = new Map();
 let selected_variant_texture_ids = new Array();
@@ -98,6 +99,12 @@ const preview_model = async (core, file_name) => {
 
 		active_renderer = modelViewerUtils.create_renderer(file, model_type, gl_context, core.view.config.modelViewerShowTextures, file_name);
 		await active_renderer.load();
+
+		core.view.modelViewerWMOHasMinimap = false;
+		if (model_type === modelViewerUtils.MODEL_TYPE_WMO && active_renderer.wmo?.wmoID) {
+			await wmo_minimap.load_minimap_textures();
+			core.view.modelViewerWMOHasMinimap = wmo_minimap.has_minimap(active_renderer.wmo.wmoID);
+		}
 
 		if (model_type === modelViewerUtils.MODEL_TYPE_M2) {
 			const displays = get_model_displays(file_data_id);
@@ -352,6 +359,7 @@ module.exports = {
 				</div>
 			</div>
 			<div class="preview-controls">
+				<input v-if="$core.view.modelViewerWMOHasMinimap" type="button" value="Export WMO Minimap" :class="{ disabled: $core.view.isBusy }" @click="export_wmo_minimap"/>
 				<component :is="$components.MenuButton" :options="$core.view.menuButtonModels" :default="$core.view.config.exportModelFormat" @change="$core.view.config.exportModelFormat = $event" class="upward" :disabled="$core.view.isBusy" @click="export_model"></component>
 			</div>
 			<div id="model-sidebar" class="sidebar">
@@ -490,6 +498,43 @@ module.exports = {
 		toggle_uv_layer(layer_name) {
 			const state = get_view_state(this.$core);
 			modelViewerUtils.toggle_uv_layer(state, active_renderer, layer_name);
+		},
+
+		async export_wmo_minimap() {
+			if (!active_renderer?.wmo?.wmoID)
+				return;
+
+			const wmo = active_renderer.wmo;
+			const helper = new ExportHelper(1, 'minimap');
+			helper.start();
+
+			try {
+				await wmo_minimap.load_minimap_textures();
+
+				const layout = wmo_minimap.compute_minimap_layout(wmo.wmoID, wmo.groupInfo);
+				if (!layout)
+					throw new Error('no minimap textures found for this WMO.');
+
+				const wmo_name = active_path || ('unknown_' + wmo.wmoID + '.wmo');
+				const base_name = path.basename(wmo_name, path.extname(wmo_name));
+				const relative_path = path.join(path.dirname(wmo_name), base_name + '_minimap.png');
+				const out_path = ExportHelper.getExportPath(relative_path);
+
+				await wmo_minimap.export_minimap(layout, this.$core.view.casc, out_path, helper);
+
+				if (helper.isCancelled())
+					return;
+
+				const export_paths = this.$core.openLastExportStream();
+				await export_paths?.writeLine('png:' + out_path);
+				export_paths?.close();
+
+				helper.mark(relative_path, true);
+			} catch (e) {
+				helper.mark('WMO minimap', false, e.message, e.stack);
+			}
+
+			helper.finish();
 		},
 
 		async export_model() {

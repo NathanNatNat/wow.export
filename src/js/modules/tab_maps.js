@@ -17,6 +17,7 @@ const WMOExporter = require('../3D/exporters/WMOExporter');
 const WMOLoader = require('../3D/loaders/WMOLoader');
 const TiledPNGWriter = require('../tiled-png-writer');
 const PNGWriter = require('../png-writer');
+const wmo_minimap = require('../wmo-minimap');
 
 const TILE_SIZE = constants.GAME.TILE_SIZE;
 const MAP_OFFSET = constants.GAME.MAP_OFFSET;
@@ -26,7 +27,6 @@ let selected_map_dir = null;
 let selected_map_name = null;
 let selected_wdt = null;
 let game_objects_db2 = null;
-let wmo_minimap_textures = null;
 let current_wmo_minimap = null;
 
 /**
@@ -93,27 +93,8 @@ const load_wmo_minimap_tile = async (x, y, size) => {
 		return false;
 
 	try {
-		const composite = document.createElement('canvas');
-		composite.width = size;
-		composite.height = size;
-
-		const ctx = composite.getContext('2d');
-		const output_scale = size / current_wmo_minimap.output_tile_size;
-
-		for (const tile of tile_list) {
-			const data = await core.view.casc.getFile(tile.fileDataID);
-			const blp = new BLPFile(data);
-			const canvas = blp.toCanvas(0b1111);
-
-			const draw_x = tile.drawX * output_scale;
-			const draw_y = tile.drawY * output_scale;
-			const draw_width = canvas.width * tile.scaleX * output_scale;
-			const draw_height = canvas.height * tile.scaleY * output_scale;
-
-			ctx.drawImage(canvas, 0, 0, canvas.width, canvas.height, draw_x, draw_y, draw_width, draw_height);
-		}
-
-		return ctx.getImageData(0, 0, size, size);
+		const scale = size / current_wmo_minimap.output_tile_size;
+		return await wmo_minimap.composite_tile(tile_list, size, core.view.casc, scale);
 	} catch (e) {
 		return false;
 	}
@@ -519,140 +500,11 @@ module.exports = {
 				if (!wmo_id)
 					return;
 
-				const tiles = wmo_minimap_textures.get(wmo_id);
-				if (!tiles || tiles.length === 0)
-					return;
+				await wmo_minimap.load_minimap_textures();
+				current_wmo_minimap = wmo_minimap.compute_minimap_layout(wmo_id, wmo.groupInfo);
 
-				const group_info = wmo.groupInfo;
-				if (!group_info || group_info.length === 0)
-					return;
-
-				// group tiles by groupNum
-				const groups_tiles = new Map();
-				for (const tile of tiles) {
-					if (!groups_tiles.has(tile.groupNum))
-						groups_tiles.set(tile.groupNum, []);
-
-					groups_tiles.get(tile.groupNum).push(tile);
-				}
-
-				// calculate absolute pixel position for each tile
-				// tile position = (bbox_min * 2) + (block * 256)
-				const tile_positions = [];
-				for (const [group_num, group_tiles] of groups_tiles) {
-					if (group_num >= group_info.length)
-						continue;
-
-					const group = group_info[group_num];
-					const g_min_x = Math.min(group.boundingBox1[0], group.boundingBox2[0]) * 2;
-					const g_min_y = Math.min(group.boundingBox1[1], group.boundingBox2[1]) * 2;
-					const g_min_z = Math.min(group.boundingBox1[2], group.boundingBox2[2]);
-
-					for (const tile of group_tiles) {
-						tile_positions.push({
-							...tile,
-							absX: g_min_x + (tile.blockX * 256),
-							absY: g_min_y + (tile.blockY * 256),
-							zOrder: g_min_z
-						});
-					}
-				}
-
-				// find bounds of all tiles
-				let min_x = Infinity, max_x = -Infinity;
-				let min_y = Infinity, max_y = -Infinity;
-
-				for (const tile of tile_positions) {
-					min_x = Math.min(min_x, tile.absX);
-					max_x = Math.max(max_x, tile.absX + 256);
-					min_y = Math.min(min_y, tile.absY);
-					max_y = Math.max(max_y, tile.absY + 256);
-				}
-
-				// calculate canvas size and convert to canvas coords
-				const canvas_width = Math.ceil(max_x - min_x);
-				const canvas_height = Math.ceil(max_y - min_y);
-
-				const positioned_tiles = [];
-				for (const tile of tile_positions) {
-					// convert to canvas coords (0,0 at top-left, Y flipped)
-					const canvas_x = tile.absX - min_x;
-					const canvas_y = (max_y - 256) - tile.absY; // flip Y for canvas
-
-					positioned_tiles.push({
-						...tile,
-						pixelX: canvas_x,
-						pixelY: canvas_y,
-						scaleX: 1,
-						scaleY: 1,
-						srcWidth: 256,
-						srcHeight: 256
-					});
-				}
-
-				if (positioned_tiles.length === 0)
-					return;
-
-				// use 256px output tile size, calculate grid
-				const OUTPUT_TILE_SIZE = 256;
-				const grid_width = Math.ceil(canvas_width / OUTPUT_TILE_SIZE);
-				const grid_height = Math.ceil(canvas_height / OUTPUT_TILE_SIZE);
-				const grid_size = Math.max(grid_width, grid_height);
-				const mask = new Array(grid_size * grid_size).fill(0);
-				const tiles_by_coord = new Map();
-
-				// assign tiles to grid cells based on their pixel position
-				for (const tile of positioned_tiles) {
-					const grid_x = Math.floor(tile.pixelX / OUTPUT_TILE_SIZE);
-					const grid_y = Math.floor(tile.pixelY / OUTPUT_TILE_SIZE);
-
-					// tile might span multiple grid cells due to scaling
-					const tile_width = tile.srcWidth * tile.scaleX;
-					const tile_height = tile.srcHeight * tile.scaleY;
-					const end_grid_x = Math.floor((tile.pixelX + tile_width - 1) / OUTPUT_TILE_SIZE);
-					const end_grid_y = Math.floor((tile.pixelY + tile_height - 1) / OUTPUT_TILE_SIZE);
-
-					for (let gx = grid_x; gx <= end_grid_x; gx++) {
-						for (let gy = grid_y; gy <= end_grid_y; gy++) {
-							if (gx < 0 || gx >= grid_size || gy < 0 || gy >= grid_size)
-								continue;
-
-							const index = (gx * grid_size) + gy;
-							mask[index] = 1;
-
-							const key = `${gx},${gy}`;
-							if (!tiles_by_coord.has(key))
-								tiles_by_coord.set(key, []);
-
-							tiles_by_coord.get(key).push({
-								...tile,
-								// offset within this grid cell
-								drawX: tile.pixelX - (gx * OUTPUT_TILE_SIZE),
-								drawY: tile.pixelY - (gy * OUTPUT_TILE_SIZE)
-							});
-						}
-					}
-				}
-
-				// sort tiles in each grid cell by Z order (lower Z drawn first, higher Z on top)
-				for (const tile_list of tiles_by_coord.values())
-					tile_list.sort((a, b) => a.zOrder - b.zOrder);
-
-				current_wmo_minimap = {
-					wmo_id,
-					tiles: positioned_tiles,
-					canvas_width,
-					canvas_height,
-					grid_width,
-					grid_height,
-					grid_size,
-					mask,
-					tiles_by_coord,
-					output_tile_size: OUTPUT_TILE_SIZE
-				};
-
-				log.write('loaded WMO minimap: %d tiles, %dx%d canvas, %dx%d grid', positioned_tiles.length, canvas_width, canvas_height, grid_width, grid_height);
-				log.write('WMO minimap unique grid cells: %d', tiles_by_coord.size);
+				if (current_wmo_minimap)
+					log.write('loaded WMO minimap: %d tiles, %dx%d canvas, %dx%d grid', current_wmo_minimap.tiles.length, current_wmo_minimap.canvas_width, current_wmo_minimap.canvas_height, current_wmo_minimap.grid_width, current_wmo_minimap.grid_height);
 			} catch (e) {
 				log.write('failed to setup WMO minimap: %s', e.message);
 				current_wmo_minimap = null;
@@ -711,7 +563,6 @@ module.exports = {
 			helper.start();
 
 			try {
-				// use cached minimap data if available, otherwise load it
 				let minimap_data = current_wmo_minimap;
 
 				if (!minimap_data) {
@@ -725,58 +576,20 @@ module.exports = {
 						throw new Error('no minimap textures found for this WMO.');
 				}
 
-				const { tiles_by_coord, canvas_width, canvas_height, output_tile_size } = minimap_data;
-
-				log.write('WMO minimap export: %d tile positions, %dx%d pixels', tiles_by_coord.size, canvas_width, canvas_height);
-
-				const writer = new TiledPNGWriter(canvas_width, canvas_height, output_tile_size);
-
-				for (const [key, tile_list] of tiles_by_coord) {
-					if (helper.isCancelled())
-						break;
-
-					try {
-						const composite = document.createElement('canvas');
-						composite.width = output_tile_size;
-						composite.height = output_tile_size;
-
-						const ctx = composite.getContext('2d');
-
-						for (const tile of tile_list) {
-							const blp_data = await this.$core.view.casc.getFile(tile.fileDataID);
-							const blp = new BLPFile(blp_data);
-							const canvas = blp.toCanvas(0b1111);
-
-							const draw_x = tile.drawX;
-							const draw_y = tile.drawY;
-							const draw_width = canvas.width * tile.scaleX;
-							const draw_height = canvas.height * tile.scaleY;
-
-							ctx.drawImage(canvas, 0, 0, canvas.width, canvas.height, draw_x, draw_y, draw_width, draw_height);
-						}
-
-						const image_data = ctx.getImageData(0, 0, output_tile_size, output_tile_size);
-
-						const [rel_x, rel_y] = key.split(',').map(Number);
-						writer.addTile(rel_x, rel_y, image_data);
-					} catch (e) {
-						log.write('failed to load WMO minimap tile at %s: %s', key, e.message);
-					}
-				}
-
 				const filename = `${selected_map_dir}_wmo_minimap.png`;
 				const relative_path = path.join('maps', selected_map_dir, filename);
 				const out_path = ExportHelper.getExportPath(relative_path);
 
-				await writer.write(out_path);
+				await wmo_minimap.export_minimap(minimap_data, this.$core.view.casc, out_path, helper);
+
+				if (helper.isCancelled())
+					return;
 
 				const export_paths = this.$core.openLastExportStream();
 				await export_paths?.writeLine('png:' + out_path);
 				export_paths?.close();
 
 				helper.mark(relative_path, true);
-				log.write('WMO minimap exported: %s', out_path);
-
 			} catch (e) {
 				helper.mark('WMO minimap', false, e.message, e.stack);
 			}
@@ -1006,23 +819,7 @@ module.exports = {
 			this.$core.showLoadingScreen(3);
 			await this.$core.progressLoadingScreen('Loading WMO minimap textures...');
 
-			wmo_minimap_textures = new Map();
-			for (const row of (await db2.WMOMinimapTexture.getAllRows()).values()) {
-				let tiles = wmo_minimap_textures.get(row.WMOID);
-				if (tiles === undefined) {
-					tiles = [];
-					wmo_minimap_textures.set(row.WMOID, tiles);
-				}
-
-				tiles.push({
-					groupNum: row.GroupNum,
-					blockX: row.BlockX,
-					blockY: row.BlockY,
-					fileDataID: row.FileDataID
-				});
-			}
-
-			log.write('loaded %d WMO minimap entries', wmo_minimap_textures.size);
+			await wmo_minimap.load_minimap_textures();
 
 			await this.$core.progressLoadingScreen('Loading maps...');
 

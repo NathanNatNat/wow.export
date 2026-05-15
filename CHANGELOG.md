@@ -1,3 +1,6 @@
+## 0.2.19 (??-??-2026)
+- Added an "Export WMO Minimap" button to the model viewer for WMOs with minimaps.
+
 ## 0.2.18 (11-05-2026)
 - Fixed GLTF primitives missing material index crashing Unreal Engine.
 - Improved rendering of WMO models in the map viewer.
