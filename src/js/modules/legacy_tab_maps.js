@@ -8,12 +8,14 @@ const InstallType = require('../install-type');
 const DBCReader = require('../db/DBCReader');
 const BufferWrapper = require('../buffer');
 const BLPFile = require('../casc/blp');
+const Shaders = require('../3D/Shaders');
 const WDTLoader = require('../3D/loaders/WDTLoader');
 const ADTLoader = require('../3D/loaders/ADTLoader');
 const ExportHelper = require('../casc/export-helper');
 const OBJWriter = require('../3D/writers/OBJWriter');
 const MTLWriter = require('../3D/writers/MTLWriter');
 const CSVWriter = require('../3D/writers/CSVWriter');
+const JSONWriter = require('../3D/writers/JSONWriter');
 const PNGWriter = require('../png-writer');
 const TiledPNGWriter = require('../tiled-png-writer');
 const generics = require('../generics');
@@ -23,6 +25,115 @@ const TILE_SIZE = constants.GAME.TILE_SIZE;
 const CHUNK_SIZE = TILE_SIZE / 16;
 const UNIT_SIZE = CHUNK_SIZE / 8;
 const UNIT_SIZE_HALF = UNIT_SIZE / 2;
+
+const TEX0_ATLAS_RES = 1024;
+const TEX0_CHUNK_RES = 64;
+const TEX0_TILE_REPEAT = 4;
+const LEGACY_TEX_SCALE = 2;
+
+let gl_shader_prog;
+let gl_canvas;
+let gl;
+
+const compile_shaders_legacy = () => {
+	const sources = Shaders.get_source('adt_old');
+	gl_shader_prog = gl.createProgram();
+
+	const frag_shader = gl.createShader(gl.FRAGMENT_SHADER);
+	gl.shaderSource(frag_shader, sources.frag);
+	gl.compileShader(frag_shader);
+
+	if (!gl.getShaderParameter(frag_shader, gl.COMPILE_STATUS))
+		throw new Error('Failed to compile fragment shader: ' + gl.getShaderInfoLog(frag_shader));
+
+	const vert_shader = gl.createShader(gl.VERTEX_SHADER);
+	gl.shaderSource(vert_shader, sources.vert);
+	gl.compileShader(vert_shader);
+
+	if (!gl.getShaderParameter(vert_shader, gl.COMPILE_STATUS))
+		throw new Error('Failed to compile vertex shader: ' + gl.getShaderInfoLog(vert_shader));
+
+	gl.attachShader(gl_shader_prog, frag_shader);
+	gl.attachShader(gl_shader_prog, vert_shader);
+	gl.linkProgram(gl_shader_prog);
+
+	if (!gl.getProgramParameter(gl_shader_prog, gl.LINK_STATUS))
+		throw new Error('Failed to link shader program: ' + gl.getProgramInfoLog(gl_shader_prog));
+
+	gl.useProgram(gl_shader_prog);
+};
+
+const build_texture_array_legacy = (tex_list) => {
+	const target_size = 512;
+	const tex_array = gl.createTexture();
+
+	gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex_array);
+	gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.RGBA, target_size, target_size, tex_list.length, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+	for (let i = 0; i < tex_list.length; i++) {
+		const data = get_mpq_file(tex_list[i]);
+		if (!data)
+			continue;
+
+		const blp = new BLPFile(data);
+		const blp_rgba = blp.toUInt8Array(0);
+
+		if (blp.width === target_size && blp.height === target_size) {
+			gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, target_size, target_size, 1, gl.RGBA, gl.UNSIGNED_BYTE, blp_rgba);
+		} else {
+			const resized = new Uint8Array(target_size * target_size * 4);
+			const scale_x = blp.width / target_size;
+			const scale_y = blp.height / target_size;
+
+			for (let y = 0; y < target_size; y++) {
+				for (let x = 0; x < target_size; x++) {
+					const src_x = Math.floor(x * scale_x);
+					const src_y = Math.floor(y * scale_y);
+					const src_idx = (src_y * blp.width + src_x) * 4;
+					const dst_idx = (y * target_size + x) * 4;
+
+					resized[dst_idx] = blp_rgba[src_idx];
+					resized[dst_idx + 1] = blp_rgba[src_idx + 1];
+					resized[dst_idx + 2] = blp_rgba[src_idx + 2];
+					resized[dst_idx + 3] = blp_rgba[src_idx + 3];
+				}
+			}
+
+			gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, target_size, target_size, 1, gl.RGBA, gl.UNSIGNED_BYTE, resized);
+		}
+	}
+
+	gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
+	return tex_array;
+};
+
+const bind_alpha_layer = (layer) => {
+	const texture = gl.createTexture();
+	gl.bindTexture(gl.TEXTURE_2D, texture);
+
+	const data = new Uint8Array(layer.length * 4);
+	for (let i = 0, j = 0, n = layer.length; i < n; i++, j += 4)
+		data[j] = data[j + 1] = data[j + 2] = data[j + 3] = layer[i];
+
+	gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 64, 64, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+	gl.generateMipmap(gl.TEXTURE_2D);
+
+	return texture;
+};
+
+const unbind_all_textures = () => {
+	for (let i = 0, n = gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS); i < n; i++) {
+		gl.activeTexture(gl.TEXTURE0 + i);
+		gl.bindTexture(gl.TEXTURE_2D, null);
+		gl.bindTexture(gl.TEXTURE_2D_ARRAY, null);
+	}
+};
+
+const clear_canvas = () => {
+	gl.viewport(0, 0, gl_canvas.width, gl_canvas.height);
+	gl.clearColor(0, 0, 0, 1);
+	gl.clear(gl.COLOR_BUFFER_BIT);
+};
 
 let selected_map_id = null;
 let selected_map_dir = null;
@@ -145,7 +256,300 @@ const load_legacy_adt = (map_dir, tile_y, tile_x) => {
 	data.seek(0);
 	adt.loadObj();
 
+	// rewind and load tex chunks (texture layers/alpha maps)
+	data.seek(0);
+	adt.loadTex(selected_wdt ?? { flags: 0 }, true);
+
 	return adt;
+};
+
+const calculate_required_images = (layer_count) => {
+	if (layer_count <= 1)
+		return 0;
+
+	return Math.ceil((layer_count - 1) / 4);
+};
+
+const load_blp_from_mpq = (texture_path) => {
+	const data = get_mpq_file(texture_path);
+	if (!data)
+		return null;
+
+	const blp = new BLPFile(data);
+	return { pixels: blp.toUInt8Array(0, 0b0111), width: blp.scaledWidth, height: blp.scaledHeight };
+};
+
+const composite_tex0_legacy = (adt) => {
+	const tex_names = adt.textures;
+	if (!tex_names || Object.keys(tex_names).length === 0)
+		return null;
+
+	const tex_list = Object.values(tex_names);
+	const textures = new Array(tex_list.length);
+	for (let i = 0; i < tex_list.length; i++)
+		textures[i] = load_blp_from_mpq(tex_list[i]);
+
+	const atlas = new Uint8Array(TEX0_ATLAS_RES * TEX0_ATLAS_RES * 4);
+
+	for (let cx = 0; cx < 16; cx++) {
+		for (let cy = 0; cy < 16; cy++) {
+			const chunk = adt.texChunks[cx * 16 + cy];
+			if (!chunk?.layers || chunk.layers.length === 0)
+				continue;
+
+			const layers = chunk.layers;
+			const alpha_layers = chunk.alphaLayers;
+			const base_px = cy * TEX0_CHUNK_RES;
+			const base_py = cx * TEX0_CHUNK_RES;
+
+			for (let py = 0; py < TEX0_CHUNK_RES; py++) {
+				for (let px = 0; px < TEX0_CHUNK_RES; px++) {
+					const u = (px / TEX0_CHUNK_RES) * TEX0_TILE_REPEAT;
+					const v = (py / TEX0_CHUNK_RES) * TEX0_TILE_REPEAT;
+
+					let r = 0, g = 0, b = 0;
+
+					for (let li = 0; li < layers.length; li++) {
+						const tex = textures[layers[li].textureId];
+						if (!tex)
+							continue;
+
+						const tx = Math.floor(u * tex.width) % tex.width;
+						const ty = Math.floor(v * tex.height) % tex.height;
+						const ti = (ty * tex.width + tx) * 4;
+
+						if (li === 0) {
+							r = tex.pixels[ti];
+							g = tex.pixels[ti + 1];
+							b = tex.pixels[ti + 2];
+						} else {
+							const a = alpha_layers?.[li] ? alpha_layers[li][py * 64 + px] / 255 : 0;
+							r += (tex.pixels[ti] - r) * a;
+							g += (tex.pixels[ti + 1] - g) * a;
+							b += (tex.pixels[ti + 2] - b) * a;
+						}
+					}
+
+					const dst = ((base_py + py) * TEX0_ATLAS_RES + (base_px + px)) * 4;
+					atlas[dst] = r;
+					atlas[dst + 1] = g;
+					atlas[dst + 2] = b;
+					atlas[dst + 3] = 255;
+				}
+			}
+		}
+	}
+
+	return atlas;
+};
+
+const export_alpha_maps = async (adt, tile_id, dir, config) => {
+	const tex_names = adt.textures;
+	if (!tex_names || Object.keys(tex_names).length === 0)
+		return;
+
+	const is_splitting = config.splitAlphaMaps;
+	const use_posix = config.pathFormat === 'posix';
+
+	// export raw diffuse textures and build material metadata
+	const tex_list = Object.values(tex_names);
+	const materials = new Array(tex_list.length);
+	for (let i = 0; i < tex_list.length; i++) {
+		const tex_path = tex_list[i];
+		const base_name = path.basename(tex_path).replace(/\.blp$/i, '.png');
+		let tex_file, tex_out_path;
+
+		if (config.enableSharedTextures) {
+			tex_out_path = ExportHelper.getExportPath(tex_path.replace(/\.blp$/i, '.png'));
+			tex_file = path.relative(dir, tex_out_path);
+		} else {
+			tex_out_path = path.join(dir, base_name);
+			tex_file = base_name;
+		}
+
+		if (config.overwriteFiles || !await generics.fileExists(tex_out_path)) {
+			const data = get_mpq_file(tex_path);
+			if (data) {
+				const blp = new BLPFile(data);
+				await blp.saveToPNG(tex_out_path);
+			}
+		}
+
+		materials[i] = {
+			file: use_posix ? ExportHelper.win32ToPosix(tex_file) : tex_file,
+			source: tex_path
+		};
+	}
+
+	const chunks = adt.texChunks;
+	const chunk_count = chunks.length;
+	const layers = [];
+
+	if (is_splitting) {
+		for (let chunk_index = 0; chunk_index < chunk_count; chunk_index++) {
+			const tex_chunk = chunks[chunk_index];
+			if (!tex_chunk?.layers)
+				continue;
+
+			const root_chunk = adt.chunks[chunk_index];
+			const fix_alpha = !(root_chunk.flags & (1 << 15));
+			const alpha_layers = tex_chunk.alphaLayers || [];
+			const required_images = calculate_required_images(alpha_layers.length);
+			const prefix = tile_id + '_' + chunk_index;
+
+			for (let image_index = 0; image_index < Math.max(1, required_images); image_index++) {
+				const png = new PNGWriter(64, 64);
+				const pixel_data = png.getPixelData();
+
+				for (let j = 0; j < 64 * 64; j++) {
+					const po = j * 4;
+					pixel_data[po] = 0;
+					pixel_data[po + 1] = 0;
+					pixel_data[po + 2] = 0;
+					pixel_data[po + 3] = 255;
+				}
+
+				const start_layer = (image_index * 4) + 1;
+				const end_layer = Math.min(start_layer + 4, alpha_layers.length);
+
+				for (let li = start_layer; li < end_layer; li++) {
+					const layer = alpha_layers[li];
+					const channel = li - start_layer;
+
+					for (let j = 0; j < layer.length; j++) {
+						const is_last_col = (j % 64) === 63;
+						const is_last_row = j >= 63 * 64;
+
+						if (fix_alpha) {
+							if (is_last_col && !is_last_row)
+								pixel_data[(j * 4) + channel] = layer[j - 1];
+							else if (is_last_row)
+								pixel_data[(j * 4) + channel] = layer[j - 64];
+							else
+								pixel_data[(j * 4) + channel] = layer[j];
+						} else {
+							pixel_data[(j * 4) + channel] = layer[j];
+						}
+					}
+				}
+
+				const suffix = image_index === 0 ? '' : '_' + image_index;
+				await png.write(path.join(dir, 'tex_' + prefix + suffix + '.png'));
+			}
+
+			// json metadata per chunk
+			const chunk_layers = [];
+			for (let i = 0; i < tex_chunk.layers.length; i++) {
+				const layer = tex_chunk.layers[i];
+				const mat = materials[layer.textureId];
+				if (!mat)
+					continue;
+
+				chunk_layers.push(Object.assign({
+					index: i,
+					effectID: layer.effectID,
+					imageIndex: i === 0 ? 0 : Math.floor((i - 1) / 4),
+					channelIndex: i === 0 ? -1 : (i - 1) % 4
+				}, mat));
+			}
+
+			const json = new JSONWriter(path.join(dir, 'tex_' + prefix + '.json'));
+			json.addProperty('layers', chunk_layers);
+			await json.write();
+		}
+	} else {
+		// combined alpha maps
+		let max_layers_needed = 1;
+		for (let chunk_index = 0; chunk_index < chunk_count; chunk_index++) {
+			const tex_chunk = chunks[chunk_index];
+			const alpha_layers = tex_chunk?.alphaLayers || [];
+			max_layers_needed = Math.max(max_layers_needed, calculate_required_images(alpha_layers.length));
+		}
+
+		for (let image_index = 0; image_index < max_layers_needed; image_index++) {
+			const png = new PNGWriter(64 * 16, 64 * 16);
+			const pixel_data = png.getPixelData();
+
+			for (let i = 0; i < pixel_data.length; i += 4) {
+				pixel_data[i] = 0;
+				pixel_data[i + 1] = 0;
+				pixel_data[i + 2] = 0;
+				pixel_data[i + 3] = 255;
+			}
+
+			for (let chunk_index = 0; chunk_index < chunk_count; chunk_index++) {
+				const tex_chunk = chunks[chunk_index];
+				if (!tex_chunk?.alphaLayers)
+					continue;
+
+				const root_chunk = adt.chunks[chunk_index];
+				const fix_alpha = !(root_chunk.flags & (1 << 15));
+				const alpha_layers = tex_chunk.alphaLayers;
+
+				const chunk_x = chunk_index % 16;
+				const chunk_y = Math.floor(chunk_index / 16);
+
+				const start_layer = (image_index * 4) + 1;
+				const end_layer = Math.min(start_layer + 4, alpha_layers.length);
+
+				for (let li = start_layer; li < end_layer; li++) {
+					const layer = alpha_layers[li];
+					const channel = li - start_layer;
+
+					for (let j = 0; j < layer.length; j++) {
+						const local_x = j % 64;
+						const local_y = Math.floor(j / 64);
+						const global_x = chunk_x * 64 + local_x;
+						const global_y = chunk_y * 64 + local_y;
+						const idx = (global_y * (64 * 16) + global_x) * 4 + channel;
+
+						const is_last_col = local_x === 63;
+						const is_last_row = local_y === 63;
+
+						if (fix_alpha) {
+							if (is_last_col && !is_last_row)
+								pixel_data[idx] = layer[j - 1];
+							else if (is_last_row)
+								pixel_data[idx] = layer[j - 64];
+							else
+								pixel_data[idx] = layer[j];
+						} else {
+							pixel_data[idx] = layer[j];
+						}
+					}
+				}
+			}
+
+			const suffix = image_index === 0 ? '' : '_' + image_index;
+			await png.write(path.join(dir, 'tex_' + tile_id + suffix + '.png'));
+		}
+
+		// combined json metadata
+		for (let chunk_index = 0; chunk_index < chunk_count; chunk_index++) {
+			const tex_chunk = chunks[chunk_index];
+			if (!tex_chunk?.layers)
+				continue;
+
+			for (let i = 0; i < tex_chunk.layers.length; i++) {
+				const layer = tex_chunk.layers[i];
+				const mat = materials[layer.textureId];
+				if (!mat)
+					continue;
+
+				layers.push(Object.assign({
+					index: i,
+					chunkIndex: chunk_index,
+					effectID: layer.effectID,
+					imageIndex: i === 0 ? 0 : Math.floor((i - 1) / 4),
+					channelIndex: i === 0 ? -1 : (i - 1) % 4
+				}, mat));
+			}
+		}
+
+		const json = new JSONWriter(path.join(dir, 'tex_' + tile_id + '.json'));
+		json.addProperty('layers', layers);
+		await json.write();
+	}
 };
 
 const resolve_m2_filename = (adt, model) => {
@@ -162,7 +566,7 @@ const resolve_wmo_filename = (adt, model) => {
 	return adt.wmoNames[adt.wmoOffsets[model.mwidEntry]] ?? null;
 };
 
-const export_terrain_obj = async (map_dir, tile_index, dir, config, helper) => {
+const export_terrain_obj = async (map_dir, tile_index, dir, config, helper, quality) => {
 	const tile_x = tile_index % MAP_SIZE;
 	const tile_y = Math.floor(tile_index / MAP_SIZE);
 	const tile_id = tile_y + '_' + tile_x;
@@ -178,11 +582,15 @@ const export_terrain_obj = async (map_dir, tile_index, dir, config, helper) => {
 	const vertices = [];
 	const normals = [];
 	const uvs = [];
+	const uvs_bake = [];
+	const vertex_colors = [];
+	const chunk_meshes = new Array(256);
 
 	const first_chunk = adt.chunks[0];
 	const first_chunk_x = first_chunk.position[0];
 	const first_chunk_y = first_chunk.position[1];
 	const include_holes = config.mapsIncludeHoles;
+	const is_gpu_bake = quality >= 1024;
 
 	let ofs = 0;
 	let chunk_id = 0;
@@ -221,6 +629,17 @@ const export_terrain_obj = async (map_dir, tile_index, dir, config, helper) => {
 					const uv_raw_v = (vz - first_chunk_y) / TILE_SIZE;
 					uvs.push(uv_raw_u, uv_raw_v);
 
+					if (is_gpu_bake) {
+						uvs_bake.push(uv_raw_u, uv_raw_v);
+
+						if (chunk.vertexShading) {
+							const color = chunk.vertexShading[idx];
+							vertex_colors.push(color.b / 255, color.g / 255, color.r / 255, color.a / 255);
+						} else {
+							vertex_colors.push(0.5, 0.5, 0.5, 1);
+						}
+					}
+
 					idx++;
 					mid_x++;
 				}
@@ -258,33 +677,228 @@ const export_terrain_obj = async (map_dir, tile_index, dir, config, helper) => {
 			}
 
 			ofs = mid_x;
+			chunk_meshes[chunk_index] = indices;
 			obj.addMesh(chunk_id, indices, 'tex_' + tile_id);
 			chunk_id++;
 		}
 	}
 
-	// minimap-based texture
-	const padded_x = tile_y.toString().padStart(2, '0');
-	const padded_y = tile_x.toString().padStart(2, '0');
-	const tile_key = util.format('%s\\map%s_%s.blp', map_dir, padded_x, padded_y);
+	const is_alpha_maps = quality === -1;
+	const is_tex0 = quality === -2;
 
-	let minimap_data = get_mpq_file('world\\minimaps\\' + tile_key);
-	if (!minimap_data && minimap_translate) {
-		const hash_file = minimap_translate.get(tile_key);
-		if (hash_file)
-			minimap_data = get_mpq_file('textures\\minimap\\' + hash_file);
-	}
-
-	if (minimap_data) {
+	if (is_alpha_maps) {
+		await export_alpha_maps(adt, tile_id, dir, config);
+	} else if (is_tex0) {
 		const tex_file = 'tex_' + tile_id + '.png';
 		const tex_out_path = path.join(dir, tex_file);
 
 		if (config.overwriteFiles || !await generics.fileExists(tex_out_path)) {
-			const blp = new BLPFile(minimap_data);
-			await blp.saveToPNG(tex_out_path);
+			const atlas = composite_tex0_legacy(adt);
+			if (atlas) {
+				const png = new PNGWriter(TEX0_ATLAS_RES, TEX0_ATLAS_RES);
+				png.getPixelData().set(atlas);
+				await png.write(tex_out_path);
+			}
 		}
 
-		mtl.addMaterial('tex_' + tile_id, tex_file);
+		if (await generics.fileExists(path.join(dir, tex_file)))
+			mtl.addMaterial('tex_' + tile_id, tex_file);
+	} else if (is_gpu_bake) {
+		const tex_file = 'tex_' + tile_id + '.png';
+		const tex_out_path = path.join(dir, tex_file);
+
+		if (config.overwriteFiles || !await generics.fileExists(tex_out_path)) {
+			if (!gl) {
+				gl_canvas = document.createElement('canvas');
+				gl = gl_canvas.getContext('webgl2');
+
+				if (!gl)
+					throw new Error('WebGL2 not supported');
+
+				compile_shaders_legacy();
+			}
+
+			const tex_names = adt.textures;
+			const tex_list = tex_names ? Object.values(tex_names) : [];
+
+			const diffuse_array = build_texture_array_legacy(tex_list);
+
+			const a_vertex_position = gl.getAttribLocation(gl_shader_prog, 'aVertexPosition');
+			const a_tex_coord = gl.getAttribLocation(gl_shader_prog, 'aTextureCoord');
+			const a_vertex_color = gl.getAttribLocation(gl_shader_prog, 'aVertexColor');
+
+			const u_diffuse_layers = gl.getUniformLocation(gl_shader_prog, 'uDiffuseLayers');
+			const u_height_layers = gl.getUniformLocation(gl_shader_prog, 'uHeightLayers');
+			const u_layer_count = gl.getUniformLocation(gl_shader_prog, 'uLayerCount');
+
+			const u_alpha_blends = [];
+			for (let i = 0; i < 7; i++)
+				u_alpha_blends[i] = gl.getUniformLocation(gl_shader_prog, 'uAlphaBlend' + i);
+
+			const u_translation = gl.getUniformLocation(gl_shader_prog, 'uTranslation');
+			const u_resolution = gl.getUniformLocation(gl_shader_prog, 'uResolution');
+			const u_zoom = gl.getUniformLocation(gl_shader_prog, 'uZoom');
+
+			gl_canvas.width = quality / 16;
+			gl_canvas.height = quality / 16;
+
+			const rotate_canvas = new OffscreenCanvas(gl_canvas.width, gl_canvas.height);
+			const rotate_ctx = rotate_canvas.getContext('2d');
+			rotate_ctx.translate(rotate_canvas.width / 2, rotate_canvas.height / 2);
+			rotate_ctx.rotate(Math.PI);
+
+			const composite = new OffscreenCanvas(quality, quality);
+			const composite_ctx = composite.getContext('2d');
+
+			clear_canvas();
+
+			gl.uniform2f(u_resolution, TILE_SIZE, TILE_SIZE);
+
+			const vertex_buffer = gl.createBuffer();
+			gl.bindBuffer(gl.ARRAY_BUFFER, vertex_buffer);
+			gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+			gl.enableVertexAttribArray(a_vertex_position);
+			gl.vertexAttribPointer(a_vertex_position, 3, gl.FLOAT, false, 0, 0);
+
+			const uv_buffer = gl.createBuffer();
+			gl.bindBuffer(gl.ARRAY_BUFFER, uv_buffer);
+			gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(uvs_bake), gl.STATIC_DRAW);
+			gl.enableVertexAttribArray(a_tex_coord);
+			gl.vertexAttribPointer(a_tex_coord, 2, gl.FLOAT, false, 0, 0);
+
+			const vc_buffer = gl.createBuffer();
+			gl.bindBuffer(gl.ARRAY_BUFFER, vc_buffer);
+			gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertex_colors), gl.STATIC_DRAW);
+			gl.enableVertexAttribArray(a_vertex_color);
+			gl.vertexAttribPointer(a_vertex_color, 4, gl.FLOAT, false, 0, 0);
+
+			const delta_x = first_chunk.position[1] - TILE_SIZE;
+			const delta_y = first_chunk.position[0] - TILE_SIZE;
+
+			gl.uniform1f(u_zoom, 0.0625);
+
+			unbind_all_textures();
+
+			const tile_size = quality / 16;
+
+			for (let x = 0; x < 16; x++) {
+				for (let y = 0; y < 16; y++) {
+					clear_canvas();
+
+					const ofs_x = -delta_x - (CHUNK_SIZE * 7.5) + (y * CHUNK_SIZE);
+					const ofs_y = -delta_y - (CHUNK_SIZE * 7.5) + (x * CHUNK_SIZE);
+
+					gl.uniform2f(u_translation, ofs_x, ofs_y);
+
+					const chunk_index = x * 16 + y;
+					const tex_chunk = adt.texChunks[chunk_index];
+					const indices = chunk_meshes[chunk_index];
+
+					if (!indices || !tex_chunk?.layers)
+						continue;
+
+					const tex_layers = tex_chunk.layers;
+					const chunk_layer_count = Math.min(tex_layers.length, 8);
+					gl.uniform1i(u_layer_count, chunk_layer_count);
+
+					unbind_all_textures();
+
+					gl.activeTexture(gl.TEXTURE0);
+					gl.bindTexture(gl.TEXTURE_2D_ARRAY, diffuse_array);
+					gl.uniform1i(u_diffuse_layers, 0);
+
+					// bind same array as height (unused by legacy shader but uniform must be valid)
+					gl.activeTexture(gl.TEXTURE1);
+					gl.bindTexture(gl.TEXTURE_2D_ARRAY, diffuse_array);
+					gl.uniform1i(u_height_layers, 1);
+
+					// bind alpha layers
+					const alpha_layers = tex_chunk.alphaLayers || [];
+					const alpha_textures = new Array(8);
+
+					for (let i = 1; i < Math.min(alpha_layers.length, 8); i++) {
+						gl.activeTexture(gl.TEXTURE0 + 2 + (i - 1));
+						const alpha_tex = bind_alpha_layer(alpha_layers[i]);
+						gl.bindTexture(gl.TEXTURE_2D, alpha_tex);
+						gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+						gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+						alpha_textures[i - 1] = alpha_tex;
+					}
+
+					for (let i = 0; i < 7; i++)
+						gl.uniform1i(u_alpha_blends[i], 2 + i);
+
+					// per-layer uniforms
+					const layer_scales = new Array(8).fill(LEGACY_TEX_SCALE);
+					const height_scales = new Array(8).fill(0);
+					const height_offsets = new Array(8).fill(1);
+					const diffuse_indices = new Array(8).fill(0);
+					const height_indices = new Array(8).fill(0);
+
+					for (let i = 0; i < chunk_layer_count; i++) {
+						diffuse_indices[i] = tex_layers[i].textureId;
+						height_indices[i] = tex_layers[i].textureId;
+					}
+
+					for (let i = 0; i < 8; i++) {
+						gl.uniform1f(gl.getUniformLocation(gl_shader_prog, `uLayerScales[${i}]`), layer_scales[i]);
+						gl.uniform1f(gl.getUniformLocation(gl_shader_prog, `uHeightScales[${i}]`), height_scales[i]);
+						gl.uniform1f(gl.getUniformLocation(gl_shader_prog, `uHeightOffsets[${i}]`), height_offsets[i]);
+						gl.uniform1f(gl.getUniformLocation(gl_shader_prog, `uDiffuseIndices[${i}]`), diffuse_indices[i]);
+						gl.uniform1f(gl.getUniformLocation(gl_shader_prog, `uHeightIndices[${i}]`), height_indices[i]);
+					}
+
+					const index_buffer = gl.createBuffer();
+					gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, index_buffer);
+					gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+					gl.drawElements(gl.TRIANGLES, indices.length, gl.UNSIGNED_SHORT, 0);
+
+					for (const tex of alpha_textures) {
+						if (tex)
+							gl.deleteTexture(tex);
+					}
+
+					// composite chunk into tile
+					rotate_ctx.drawImage(gl_canvas, -(rotate_canvas.width / 2), -(rotate_canvas.height / 2));
+
+					const chunk_x = chunk_index % 16;
+					const chunk_y = Math.floor(chunk_index / 16);
+					composite_ctx.drawImage(rotate_canvas, chunk_x * tile_size, chunk_y * tile_size);
+				}
+			}
+
+			gl.deleteTexture(diffuse_array);
+			gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+			const buf = await BufferWrapper.fromCanvas(composite, 'image/png');
+			await buf.writeToFile(tex_out_path);
+		}
+
+		mtl.addMaterial('tex_' + tile_id, 'tex_' + tile_id + '.png');
+	} else if (quality !== 0) {
+		// minimap-based texture
+		const padded_x = tile_y.toString().padStart(2, '0');
+		const padded_y = tile_x.toString().padStart(2, '0');
+		const tile_key = util.format('%s\\map%s_%s.blp', map_dir, padded_x, padded_y);
+
+		let minimap_data = get_mpq_file('world\\minimaps\\' + tile_key);
+		if (!minimap_data && minimap_translate) {
+			const hash_file = minimap_translate.get(tile_key);
+			if (hash_file)
+				minimap_data = get_mpq_file('textures\\minimap\\' + hash_file);
+		}
+
+		if (minimap_data) {
+			const tex_file = 'tex_' + tile_id + '.png';
+			const tex_out_path = path.join(dir, tex_file);
+
+			if (config.overwriteFiles || !await generics.fileExists(tex_out_path)) {
+				const blp = new BLPFile(minimap_data);
+				await blp.saveToPNG(tex_out_path);
+			}
+
+			mtl.addMaterial('tex_' + tile_id, tex_file);
+		}
 	}
 
 	obj.setVertArray(vertices);
@@ -461,6 +1075,8 @@ module.exports = {
 					<input type="checkbox" v-model="$core.view.config.mapsIncludeHoles"/>
 					<span>Include Holes</span>
 				</label>
+				<span class="header">Terrain Texture Quality</span>
+				<component :is="$components.MenuButton" :options="menuButtonTextureQuality" :default="$core.view.config.exportMapQuality" @change="$core.view.config.exportMapQuality = $event" :disabled="$core.view.isBusy" :dropdown="true"></component>
 			</div>
 		</div>
 	`,
@@ -471,6 +1087,16 @@ module.exports = {
 				{ label: 'Export OBJ', value: 'OBJ' },
 				{ label: 'Export PNG', value: 'PNG' },
 				{ label: 'Export Minimap Tiles', value: 'MINIMAP' }
+			],
+			menuButtonTextureQuality: [
+				{ label: 'Alpha Maps', value: -1 },
+				{ label: 'None', value: 0 },
+				{ label: 'Minimap (512)', value: 512 },
+				{ label: 'Baked (1k)', value: -2 },
+				{ label: 'Low (1k)', value: 1024 },
+				{ label: 'Medium (4k)', value: 4096 },
+				{ label: 'High (8k)', value: 8192 },
+				{ label: 'Ultra (16k)', value: 16384 }
 			]
 		};
 	},
@@ -568,6 +1194,7 @@ module.exports = {
 
 		async export_selected_map() {
 			const export_tiles = this.$core.view.mapViewerSelection;
+			const quality = this.$core.view.config.exportMapQuality;
 
 			if (export_tiles.length === 0)
 				return this.$core.setToast('error', 'You haven\'t selected any tiles; hold shift and click on a map tile to select it.', null, -1);
@@ -584,7 +1211,7 @@ module.exports = {
 					break;
 
 				try {
-					const obj_path = await export_terrain_obj(selected_map_dir, index, dir, this.$core.view.config, helper);
+					const obj_path = await export_terrain_obj(selected_map_dir, index, dir, this.$core.view.config, helper, quality);
 					await export_paths?.writeLine('ADT_OBJ:' + obj_path);
 					helper.mark(mark_path, true);
 				} catch (e) {

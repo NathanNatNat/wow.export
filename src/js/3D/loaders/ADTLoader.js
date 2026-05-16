@@ -36,11 +36,13 @@ class ADTLoader {
 	/**
 	 * Parse this ADT as a texture file.
 	 * @param {WDTLoader} wdt
+	 * @param {boolean} [monolithic=false]
 	 */
-	loadTex(wdt) {
+	loadTex(wdt, monolithic = false) {
 		this.texChunks = new Array(16 * 16);
 		this.chunkIndex = 0;
 		this.wdt = wdt;
+		this.monolithic = monolithic;
 
 		this.handlers = ADTTexChunkHandlers;
 		this._load();
@@ -361,16 +363,24 @@ const ADTTexChunkHandlers = {
 		const endOfs = data.offset + chunkSize;
 		const chunk = this.texChunks[this.chunkIndex++] = {};
 
+		// monolithic ADTs have a 128-byte MCNK header before sub-chunks
+		if (this.monolithic)
+			data.move(128);
+
 		// Read sub-chunks.
 		while (data.offset < endOfs) {
 			const chunkID = data.readUInt32LE();
 			const subChunkSize = data.readUInt32LE();
-			const nextChunkPos = data.offset + subChunkSize;
+			let nextChunkPos = data.offset + subChunkSize;
+
+			// MCNR has 13 bytes of padding not included in chunk size
+			if (chunkID === 0x4D434E52)
+				nextChunkPos += 13;
 
 			const handler = TexMCNKChunkHandlers[chunkID];
 			if (handler)
 				handler.call(chunk, data, subChunkSize, this.wdt);
-	
+
 			// Ensure that we start at the next chunk exactly.
 			data.seek(nextChunkPos);
 		}
