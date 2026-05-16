@@ -56,6 +56,7 @@ const MODULES = {
 	legacy_tab_fonts: require('./modules/legacy_tab_fonts'),
 	legacy_tab_files: require('./modules/legacy_tab_files'),
 	legacy_tab_data: require('./modules/legacy_tab_data'),
+	legacy_tab_maps: require('./modules/legacy_tab_maps'),
 	tab_models_legacy: require('./modules/tab_models_legacy')
 };
 

@@ -109,12 +109,16 @@ const ADTChunkHandlers = {
 		while (data.offset < endOfs) {
 			const chunkID = data.readUInt32LE();
 			const subChunkSize = data.readUInt32LE();
-			const nextChunkPos = data.offset + subChunkSize;
+			let nextChunkPos = data.offset + subChunkSize;
+
+			// MCNR has 13 bytes of padding not included in chunk size
+			if (chunkID === 0x4D434E52)
+				nextChunkPos += 13;
 
 			const handler = RootMCNKChunkHandlers[chunkID];
 			if (handler)
 				handler.call(chunk, data, subChunkSize);
-	
+
 			// Ensure that we start at the next chunk exactly.
 			data.seek(nextChunkPos);
 		}
