@@ -1,5 +1,8 @@
 ## 0.2.19 (??-??-2026)
 - Added an "Export WMO Minimap" button to the model viewer for WMOs with minimaps.
+- Added "Maps" tab to MPQ Legacy builds with map previews and exports.
+- Added ability to export minimaps directly from maps for MPQ legacy builds.
+- Added ability to export terrain with pre-baked and alpha map support for MPQ legacy builds.
 
 ## 0.2.18 (11-05-2026)
 - Fixed GLTF primitives missing material index crashing Unreal Engine.
