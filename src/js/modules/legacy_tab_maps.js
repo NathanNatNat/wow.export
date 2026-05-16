@@ -107,6 +107,26 @@ const build_texture_array_legacy = (tex_list) => {
 	return tex_array;
 };
 
+const fix_alpha_layer = (layer, needs_fix) => {
+	if (!needs_fix)
+		return layer;
+
+	const fixed = new Array(64 * 64);
+	for (let j = 0; j < 64 * 64; j++) {
+		const is_last_col = (j % 64) === 63;
+		const is_last_row = j >= 63 * 64;
+
+		if (is_last_col && !is_last_row)
+			fixed[j] = layer[j - 1];
+		else if (is_last_row)
+			fixed[j] = layer[j - 64];
+		else
+			fixed[j] = layer[j];
+	}
+
+	return fixed;
+};
+
 const bind_alpha_layer = (layer) => {
 	const texture = gl.createTexture();
 	gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -813,12 +833,14 @@ const export_terrain_obj = async (map_dir, tile_index, dir, config, helper, qual
 					gl.uniform1i(u_height_layers, 1);
 
 					// bind alpha layers
+					const root_chunk = adt.chunks[chunk_index];
+					const needs_fix = !(root_chunk.flags & (1 << 15));
 					const alpha_layers = tex_chunk.alphaLayers || [];
 					const alpha_textures = new Array(8);
 
 					for (let i = 1; i < Math.min(alpha_layers.length, 8); i++) {
 						gl.activeTexture(gl.TEXTURE0 + 2 + (i - 1));
-						const alpha_tex = bind_alpha_layer(alpha_layers[i]);
+						const alpha_tex = bind_alpha_layer(fix_alpha_layer(alpha_layers[i], needs_fix));
 						gl.bindTexture(gl.TEXTURE_2D, alpha_tex);
 						gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
 						gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
