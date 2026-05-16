@@ -1630,9 +1630,10 @@ def createBlendedTerrain(materialName, textureLocation, layers, baseDir, extensi
             # create texture mapping for this layer
             texture_mapping = nodes.new('ShaderNodeMapping')
             texture_mapping.location = (-2000, 500 - layer_idx * 150)
-            texture_mapping.inputs[3].default_value[0] = 8 / layer['scale']
-            texture_mapping.inputs[3].default_value[1] = 8 / layer['scale']
-            texture_mapping.inputs[3].default_value[2] = 8 / layer['scale']
+            layer_scale = layer.get('scale', 1)
+            texture_mapping.inputs[3].default_value[0] = 8 / layer_scale
+            texture_mapping.inputs[3].default_value[1] = 8 / layer_scale
+            texture_mapping.inputs[3].default_value[2] = 8 / layer_scale
             texture_mapping.parent = layer_frame
             node_tree.links.new(texture_coords.outputs['UV'], texture_mapping.inputs['Vector'])
 

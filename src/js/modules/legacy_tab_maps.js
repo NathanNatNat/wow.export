@@ -397,7 +397,8 @@ const export_alpha_maps = async (adt, tile_id, dir, config) => {
 
 		materials[i] = {
 			file: use_posix ? ExportHelper.win32ToPosix(tex_file) : tex_file,
-			source: tex_path
+			source: tex_path,
+			scale: 1
 		};
 	}
 
@@ -611,6 +612,9 @@ const export_terrain_obj = async (map_dir, tile_index, dir, config, helper, qual
 	const first_chunk_y = first_chunk.position[1];
 	const include_holes = config.mapsIncludeHoles;
 	const is_gpu_bake = quality >= 1024;
+	const is_alpha_maps = quality === -1;
+	const is_tex0 = quality === -2;
+	const is_splitting_alpha = is_alpha_maps && config.splitAlphaMaps;
 
 	let ofs = 0;
 	let chunk_id = 0;
@@ -645,12 +649,19 @@ const export_terrain_obj = async (map_dir, tile_index, dir, config, helper, qual
 					const normal = chunk.normals[idx];
 					normals.push(normal[0] / 127, normal[1] / 127, normal[2] / 127);
 
-					const uv_raw_u = -(vx - first_chunk_x) / TILE_SIZE;
-					const uv_raw_v = (vz - first_chunk_y) / TILE_SIZE;
-					uvs.push(uv_raw_u, uv_raw_v);
+					if (is_splitting_alpha) {
+						const uv_idx = is_short ? col + 0.5 : col;
+						uvs.push(uv_idx / 8, 1 - (row / 16));
+					} else {
+						const uv_raw_u = -(vx - first_chunk_x) / TILE_SIZE;
+						const uv_raw_v = (vz - first_chunk_y) / TILE_SIZE;
+						uvs.push(uv_raw_u, uv_raw_v);
+
+						if (is_gpu_bake)
+							uvs_bake.push(uv_raw_u, uv_raw_v);
+					}
 
 					if (is_gpu_bake) {
-						uvs_bake.push(uv_raw_u, uv_raw_v);
 
 						if (chunk.vertexShading) {
 							const color = chunk.vertexShading[idx];
@@ -698,16 +709,25 @@ const export_terrain_obj = async (map_dir, tile_index, dir, config, helper, qual
 
 			ofs = mid_x;
 			chunk_meshes[chunk_index] = indices;
-			obj.addMesh(chunk_id, indices, 'tex_' + tile_id);
+
+			if (is_splitting_alpha) {
+				const obj_name = tile_id + '_' + chunk_id;
+				const mat_name = 'tex_' + obj_name;
+				mtl.addMaterial(mat_name, mat_name + '.png');
+				obj.addMesh(obj_name, indices, mat_name);
+			} else {
+				obj.addMesh(chunk_id, indices, 'tex_' + tile_id);
+			}
+
 			chunk_id++;
 		}
 	}
 
-	const is_alpha_maps = quality === -1;
-	const is_tex0 = quality === -2;
-
 	if (is_alpha_maps) {
 		await export_alpha_maps(adt, tile_id, dir, config);
+
+		if (!config.splitAlphaMaps)
+			mtl.addMaterial('tex_' + tile_id, 'tex_' + tile_id + '.png');
 	} else if (is_tex0) {
 		const tex_file = 'tex_' + tile_id + '.png';
 		const tex_out_path = path.join(dir, tex_file);
